@@ -1,0 +1,11 @@
+[
+  {
+    "name": "connect.sid",
+    "value": "s%3Ayour_session_id_here...",
+    "domain": ".stockbit.com",
+    "path": "/",
+    "httpOnly": true,
+    "secure": true,
+    "sameSite": "Lax"
+  }
+]
