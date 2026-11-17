@@ -398,8 +398,8 @@ export async function getWatchlistSymbols(page) {
   console.log('📋 Mengambil daftar emiten dari https://stockbit.com/watchlist...');
 
   await page.goto('https://stockbit.com/watchlist', {
-    waitUntil: 'networkidle2',
-    timeout: 45000,
+    waitUntil: 'domcontentloaded',
+    timeout: 30000,
   });
 
   // Periksa apakah halaman dialihkan ke halaman login (artinya cookies belum terpasang atau expired)
@@ -414,9 +414,9 @@ export async function getWatchlistSymbols(page) {
     );
   }
 
-  // Tunggu container tabel ant-table selesai dimuat dengan proteksi timeout yang jelas
+  // Tunggu hingga baris data emiten (tr.ant-table-row) benar-benar selesai dimuat
   try {
-    await page.waitForSelector('tbody.ant-table-tbody', { timeout: 20000 });
+    await page.waitForSelector('tbody.ant-table-tbody tr.ant-table-row', { timeout: 25000 });
   } catch (timeoutErr) {
     const checkUrl = page.url();
     if (checkUrl.includes('/login')) {
@@ -426,31 +426,43 @@ export async function getWatchlistSymbols(page) {
       );
     }
     throw new Error(
-      'Gagal memuat tabel watchlist Stockbit (tbody.ant-table-tbody tidak muncul dalam 20 detik). ' +
+      'Gagal memuat baris data watchlist Stockbit (tbody.ant-table-tbody tr.ant-table-row tidak muncul dalam 25 detik). ' +
         'Pastikan akun Stockbit memiliki daftar saham pada watchlist default.'
     );
   }
 
-  // Ekstraksi kode emiten di dalam DOM
+  // Beri jeda singkat agar seluruh baris selesai dirender sepenuhnya
+  await new Promise((r) => setTimeout(r, 800));
+
+  // Ekstraksi kode emiten di dalam DOM (melalui link /symbol/[KODE] dan sel pertama tabel)
   const symbols = await page.evaluate(() => {
-    // Baris ant-table-row pada tabel watchlist Stockbit
-    const rows = Array.from(document.querySelectorAll('tbody.ant-table-tbody > tr.ant-table-row'));
+    // 1. Strategi utama: Ambil langsung dari link href="/symbol/KODE" di tabel watchlist
+    const links = Array.from(document.querySelectorAll('tbody.ant-table-tbody a[href*="/symbol/"]'));
+    const stockCodes = links
+      .map((a) => {
+        const href = a.getAttribute('href') || '';
+        const match = href.match(/\/symbol\/([A-Za-z0-9]+)/);
+        return match ? match[1].toUpperCase() : null;
+      })
+      .filter(Boolean);
+
+    if (stockCodes.length > 0) {
+      return Array.from(new Set(stockCodes));
+    }
+
+    // 2. Strategi fallback: Iterasi baris tabel ant-table-row
+    const rows = Array.from(document.querySelectorAll('tbody.ant-table-tbody tr.ant-table-row'));
     const result = [];
 
     for (const row of rows) {
-      // Abaikan measure-row yang dibuat oleh Ant Design untuk pengukuran lebar kolom
       if (row.classList.contains('ant-table-measure-row')) continue;
-
-      // Sel pertama selalu fixed-left yang memuat kode emiten
-      const firstCell = row.querySelector('td.ant-table-cell-fix-left');
+      const firstCell = row.querySelector('td.ant-table-cell-fix-left') || row.children[0];
       if (!firstCell) continue;
 
-      // Wrapper styled-components (div[class*="sc-c5bdc04d"]) atau elemen turunan sel pertama
       const codeWrapper = firstCell.querySelector('div[class*="sc-c5bdc04d"]') || firstCell;
       const text = (codeWrapper.innerText || codeWrapper.textContent || '').trim();
 
       if (text) {
-        // Ambil token kode saham pertama (4-6 karakter alfanumerik kapital, e.g. "BBCA", "AXIO")
         const match = text.match(/^[A-Z0-9]{4,6}/);
         if (match) {
           result.push(match[0]);
@@ -463,7 +475,6 @@ export async function getWatchlistSymbols(page) {
       }
     }
 
-    // Kembalikan daftar unik
     return Array.from(new Set(result));
   });
 
@@ -484,8 +495,8 @@ export async function scrapeStockDetail(page, symbol) {
   console.log(`🔍 Mengunjungi halaman emiten: ${url}`);
 
   await page.goto(url, {
-    waitUntil: 'networkidle2',
-    timeout: 45000,
+    waitUntil: 'domcontentloaded',
+    timeout: 30000,
   });
 
   // Tunggu container utama halaman selesai dimuat
@@ -918,17 +929,6 @@ export async function captureWatchlistWorkflow({
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     );
-
-    // Optimasi request interception: blokir asset gambar, media, dan font yang tidak memengaruhi DOM data
-    await page.setRequestInterception(true);
-    page.on('request', (req) => {
-      const resourceType = req.resourceType();
-      if (['image', 'media', 'font'].includes(resourceType)) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
 
     // 2. Pasang session cookies agar dapat mengakses data penuh Stockbit (termasuk Broker Summary)
     const hasCookies = await applyCookies(page);
