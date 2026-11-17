@@ -42,10 +42,21 @@ export async function handleCaptureWatchlist(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleCaptureWatchlist:', error);
-    return res.status(500).json({
+    console.error('❌ Error pada handleCaptureWatchlist:', error.message);
+    const isAuthError =
+      error.message.includes('cookies.json') ||
+      error.message.includes('login') ||
+      error.message.includes('Sesi');
+
+    return res.status(isAuthError ? 401 : 500).json({
       status: 'error',
-      message: 'Gagal menjalankan capture watchlist',
+      requiresLogin: isAuthError,
+      message: isAuthError
+        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses halaman Watchlist.'
+        : 'Gagal menjalankan capture watchlist',
+      solution: isAuthError
+        ? 'Silakan jalankan "npm run login" di folder backend untuk login manual dan menyimpan cookies.json, atau berikan daftar emiten langsung pada request: { "symbols": ["BBCA", "BBRI"] }'
+        : undefined,
       error: error.message,
     });
   }

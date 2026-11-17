@@ -1,10 +1,36 @@
 import puppeteer from 'puppeteer';
 import fs from 'fs/promises';
+import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+/**
+ * Deteksi path Google Chrome reguler di sistem pengguna (Windows/Linux/Mac)
+ * Menggunakan Chrome asli dapat menghindari blokir keamanan Google OAuth ("This browser or app may not be secure")
+ */
+function findChromeExecutable() {
+  const candidates = [
+    process.env.CHROME_BIN,
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
+    'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+  ].filter(Boolean);
+
+  for (const p of candidates) {
+    try {
+      if (fsSync.existsSync(p)) return p;
+    } catch {
+      // Abaikan jika tidak ada akses
+    }
+  }
+  return undefined;
+}
 
 // Lokasi default file cookies.json
 const DEFAULT_COOKIES_PATHS = [
@@ -152,33 +178,101 @@ export function parseTradeDate(rawDateStr) {
 }
 
 /**
- * Membaca session cookies dari file JSON
+ * Normalisasi berbagai format cookies (Array, Object key-value, atau raw cookie string)
+ * menjadi format array cookie yang valid untuk Puppeteer.
+ */
+function normalizeCookies(data) {
+  if (!data) return [];
+
+  // Jika sudah berupa Array objek Puppeteer [{ name, value, ... }]
+  if (Array.isArray(data)) {
+    return data
+      .filter((c) => c && c.name && c.value !== undefined)
+      .map((c) => ({
+        name: String(c.name).trim(),
+        value: String(c.value),
+        domain: c.domain || '.stockbit.com',
+        path: c.path || '/',
+        httpOnly: !!c.httpOnly,
+        secure: !!c.secure,
+      }));
+  }
+
+  // Jika berupa Object key-value: { "credentialStorage": "...", "sb_is_social_logged_in": "y" }
+  if (typeof data === 'object' && data !== null) {
+    return Object.entries(data).map(([name, value]) => ({
+      name: String(name).trim(),
+      value: typeof value === 'string' ? value : JSON.stringify(value),
+      domain: '.stockbit.com',
+      path: '/',
+    }));
+  }
+
+  // Jika berupa string mentah: "credentialStorage=...; sb_is_social_logged_in=y"
+  if (typeof data === 'string') {
+    return data
+      .split(';')
+      .map((pair) => {
+        const idx = pair.indexOf('=');
+        if (idx === -1) return null;
+        return {
+          name: pair.slice(0, idx).trim(),
+          value: pair.slice(idx + 1).trim(),
+          domain: '.stockbit.com',
+          path: '/',
+        };
+      })
+      .filter(Boolean);
+  }
+
+  return [];
+}
+
+/**
+ * Membaca session cookies dari file JSON atau teks
  * @returns {Promise<Array<Object>|null>}
  */
 export async function loadCookies() {
   for (const cookiePath of DEFAULT_COOKIES_PATHS) {
     try {
-      const content = await fs.readFile(cookiePath, 'utf-8');
-      const parsed = JSON.parse(content);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        console.log(`🍪 Berhasil membaca cookies dari ${cookiePath} (${parsed.length} item)`);
-        return parsed;
+      const content = (await fs.readFile(cookiePath, 'utf-8')).trim();
+      if (!content) continue;
+
+      let parsed;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        // Jika bukan format JSON, coba parse sebagai cookie string biasa
+        parsed = content;
+      }
+
+      const normalized = normalizeCookies(parsed);
+      if (normalized.length > 0) {
+        console.log(`🍪 Berhasil membaca cookies dari ${cookiePath} (${normalized.length} item)`);
+        return normalized;
       }
     } catch {
-      // Lanjut ke path berikutnya jika gagal membaca
+      // Lanjut ke path berikutnya jika file tidak ada
     }
   }
 
   // Cek apakah ada cookie string dalam .env (STOCKBIT_COOKIES)
   if (process.env.STOCKBIT_COOKIES) {
     try {
-      const parsed = JSON.parse(process.env.STOCKBIT_COOKIES);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        console.log(`🍪 Berhasil membaca cookies dari variabel .env (${parsed.length} item)`);
-        return parsed;
+      const envRaw = process.env.STOCKBIT_COOKIES.trim();
+      let parsed;
+      try {
+        parsed = JSON.parse(envRaw);
+      } catch {
+        parsed = envRaw;
+      }
+      const normalized = normalizeCookies(parsed);
+      if (normalized.length > 0) {
+        console.log(`🍪 Berhasil membaca cookies dari variabel .env (${normalized.length} item)`);
+        return normalized;
       }
     } catch {
-      // Abaikan jika bukan JSON valid
+      // Abaikan jika error
     }
   }
 
@@ -192,23 +286,8 @@ export async function loadCookies() {
 export async function applyCookies(page) {
   const cookies = await loadCookies();
   if (cookies && cookies.length > 0) {
-    // Filter atribut cookie yang mungkin tidak kompatibel dengan Puppeteer
-    const validCookies = cookies.map((c) => {
-      const cookie = {
-        name: c.name,
-        value: c.value,
-        domain: c.domain || '.stockbit.com',
-        path: c.path || '/',
-        httpOnly: !!c.httpOnly,
-        secure: !!c.secure,
-      };
-      if (c.expires && c.expires > 0) cookie.expires = c.expires;
-      if (['Strict', 'Lax', 'None'].includes(c.sameSite)) cookie.sameSite = c.sameSite;
-      return cookie;
-    });
-
-    await page.setCookie(...validCookies);
-    console.log(`✅ ${validCookies.length} session cookies berhasil dipasang ke halaman.`);
+    await page.setCookie(...cookies);
+    console.log(`✅ ${cookies.length} session cookies berhasil dipasang ke halaman.`);
     return true;
   } else {
     console.warn('⚠️ Tidak ada cookies.json yang ditemukan. Puppeteer akan berjalan tanpa login.');
@@ -229,15 +308,34 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
   const targetPath = outputPath || path.resolve(__dirname, '../../cookies.json');
   console.log(`🚀 Meluncurkan browser untuk login manual ke Stockbit...`);
 
+  const realChromePath = findChromeExecutable();
+  if (realChromePath) {
+    console.log(`🌐 Menggunakan binary Chrome asli sistem: ${realChromePath}`);
+  }
+
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
-    args: ['--start-maximized', '--no-sandbox', '--disable-setuid-sandbox'],
+    executablePath: realChromePath || undefined,
+    ignoreDefaultArgs: ['--enable-automation'],
+    args: [
+      '--start-maximized',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-blink-features=AutomationControlled',
+    ],
   });
 
   try {
     const pages = await browser.pages();
     const page = pages.length > 0 ? pages[0] : await browser.newPage();
+
+    // Sembunyikan tanda-tanda navigator.webdriver
+    await page.evaluateOnNewDocument(() => {
+      Object.defineProperty(navigator, 'webdriver', {
+        get: () => undefined,
+      });
+    });
 
     console.log(`🔗 Membuka halaman login: https://stockbit.com/login`);
     await page.goto('https://stockbit.com/login', { waitUntil: 'networkidle2', timeout: 60000 });
@@ -304,8 +402,34 @@ export async function getWatchlistSymbols(page) {
     timeout: 45000,
   });
 
-  // Tunggu container tabel ant-table selesai dimuat
-  await page.waitForSelector('tbody.ant-table-tbody', { timeout: 25000 });
+  // Periksa apakah halaman dialihkan ke halaman login (artinya cookies belum terpasang atau expired)
+  const currentUrl = page.url();
+  if (currentUrl.includes('/login') || (!currentUrl.includes('/watchlist') && !currentUrl.includes('stockbit.com'))) {
+    throw new Error(
+      'Halaman Watchlist memerlukan sesi akun yang sudah login (terdeteksi redirect ke: ' +
+        currentUrl +
+        '). ' +
+        'Silakan login terlebih dahulu menggunakan perintah "npm run login" di terminal backend agar cookies.json tersimpan, ' +
+        'atau kirim parameter "symbols" pada body request (contoh: { "symbols": ["BBCA", "BBRI"] }) jika ingin menentukan emiten secara manual.'
+    );
+  }
+
+  // Tunggu container tabel ant-table selesai dimuat dengan proteksi timeout yang jelas
+  try {
+    await page.waitForSelector('tbody.ant-table-tbody', { timeout: 20000 });
+  } catch (timeoutErr) {
+    const checkUrl = page.url();
+    if (checkUrl.includes('/login')) {
+      throw new Error(
+        'Sesi login Stockbit tidak valid atau belum dimuat. Halaman terlempar ke /login. ' +
+          'Silakan jalankan "npm run login" untuk memperbarui sesi.'
+      );
+    }
+    throw new Error(
+      'Gagal memuat tabel watchlist Stockbit (tbody.ant-table-tbody tidak muncul dalam 20 detik). ' +
+        'Pastikan akun Stockbit memiliki daftar saham pada watchlist default.'
+    );
+  }
 
   // Ekstraksi kode emiten di dalam DOM
   const symbols = await page.evaluate(() => {
@@ -365,7 +489,28 @@ export async function scrapeStockDetail(page, symbol) {
   });
 
   // Tunggu container utama halaman selesai dimuat
-  await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 25000 });
+  try {
+    await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
+  } catch {
+    const currentUrl = page.url();
+    if (currentUrl.includes('/login')) {
+      throw new Error(
+        `Gagal membuka emiten ${stockCode}: halaman dialihkan ke ${currentUrl}. Pastikan Anda telah login menggunakan "npm run login".`
+      );
+    }
+    // Cek apakah halaman berada dalam mode tamu (tanpa session login)
+    const isGuestView = await page.evaluate(() => {
+      return !document.querySelector('main#main-container') && !!document.querySelector('a[href*="/login"]');
+    });
+
+    if (isGuestView) {
+      throw new Error(
+        `Halaman emiten ${stockCode} terbuka dalam mode tamu (belum login). ` +
+        `Fitur antrean Orderbook dan data Broker Summary hanya tersedia untuk akun yang sudah login. ` +
+        `Silakan simpan sesi login terlebih dahulu dengan perintah "npm run login".`
+      );
+    }
+  }
 
   // Scroll secukupnya ke bawah untuk memicu lazy-render komponen di panel kanan (Broker Summary)
   await page.evaluate(() => {
@@ -448,42 +593,28 @@ export async function scrapeStockDetail(page, symbol) {
       }
 
       // B. Ekstrak Baris Antrean Orderbook
-      // Cari baris-baris (tr atau div baris flex) di dalam orderbook container
-      const candidateRows = Array.from(
-        orderbookHeaderContainer.querySelectorAll('tr, div[class*="row"], div[class*="item"]')
-      );
+      // Cari baris-baris di dalam card Orderbook (parentCard) yang memuat 6 kolom antrean
+      const allDivsInCard = Array.from(parentCard.querySelectorAll('tr, div'));
+      for (const d of allDivsInCard) {
+        // Cek jika elemen memiliki tepat 6 anak kolom langsung (Freq | Lot | Bid | Offer | Lot | Freq)
+        if (d.children.length === 6) {
+          const cells = Array.from(d.children);
+          const hasBid = (cells[0].className + cells[1].className + cells[2].className).toLowerCase().includes('bid');
+          const hasOffer = (cells[3].className + cells[4].className + cells[5].className).toLowerCase().includes('offer');
+          const rowText = (d.innerText || '').toLowerCase();
 
-      for (const row of candidateRows) {
-        // Ambil sel / kolom di dalam baris
-        const cells = Array.from(row.querySelectorAll('td, div[class*="col"], span'))
-          .map((c) => (c.innerText || '').trim())
-          .filter((txt) => txt.length > 0);
-
-        // Baris Orderbook memiliki 6 nilai: Freq | Lot | Bid | Offer | Lot | Freq
-        // Atau jika hanya ada teks cell langsung dalam baris
-        if (cells.length >= 6) {
-          const firstCol = cells[0];
-          const middleCol = cells[2];
-
-          // Abaikan baris header ("Freq", "Lot", "Bid", ...)
-          if (firstCol.toLowerCase().includes('freq') || middleCol.toLowerCase().includes('bid')) {
-            continue;
+          // Pastikan bukan header dan bukan ringkasan total
+          if (hasBid && hasOffer && !rowText.includes('freq') && !rowText.includes('total')) {
+            const texts = cells.map((c) => (c.innerText || '').trim());
+            rawOrderbookRows.push({
+              bidFreq: texts[0] || '0',
+              bidLot: texts[1] || '0',
+              bidPrice: texts[2] || '0',
+              offerPrice: texts[3] || '0',
+              offerLot: texts[4] || '0',
+              offerFreq: texts[5] || '0',
+            });
           }
-
-          // Abaikan baris ringkasan "Total" di bagian bawah
-          const rowTextCombined = cells.join(' ').toLowerCase();
-          if (rowTextCombined.includes('total')) {
-            continue;
-          }
-
-          rawOrderbookRows.push({
-            bidFreq: cells[0] || '0',
-            bidLot: cells[1] || '0',
-            bidPrice: cells[2] || '0',
-            offerPrice: cells[3] || '0',
-            offerLot: cells[4] || '0',
-            offerFreq: cells[5] || '0',
-          });
         }
       }
     }
@@ -800,11 +931,18 @@ export async function captureWatchlistWorkflow({
     });
 
     // 2. Pasang session cookies agar dapat mengakses data penuh Stockbit (termasuk Broker Summary)
-    await applyCookies(page);
+    const hasCookies = await applyCookies(page);
 
     // 3. Tentukan daftar kode emiten
     let targetSymbols = symbols;
     if (!targetSymbols || targetSymbols.length === 0) {
+      if (!hasCookies) {
+        throw new Error(
+          'Tidak dapat mengakses Watchlist karena file cookies.json belum tersedia (akun belum login). ' +
+          'Silakan jalankan "npm run login" di terminal backend terlebih dahulu untuk login manual dan menyimpan cookies sesi, ' +
+          'atau tentukan daftar emiten secara eksplisit pada body request: { "symbols": ["BBCA", "BBRI"] }.'
+        );
+      }
       targetSymbols = await getWatchlistSymbols(page);
     }
 
@@ -892,10 +1030,13 @@ export async function captureSingleStock(stockCode, headless = true) {
   try {
     browser = await puppeteer.launch({
       headless: headless ? 'new' : false,
-      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--window-size=1920,1080'],
     });
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    );
     await applyCookies(page);
 
     return await scrapeStockDetail(page, stockCode);
