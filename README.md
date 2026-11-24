@@ -1,53 +1,49 @@
 # 📊 Stock Capture App
 
-Aplikasi otomatisasi untuk mengambil (*scrape*), mencatat, dan menganalisis data pasar modal Indonesia dari **Stockbit** (Orderbook dan Broker Summary), dilengkapi dengan backend Node.js transaksional MySQL dan antarmuka web.
+Aplikasi otomatisasi untuk mengambil (*scrape*), mencatat, dan menganalisis data pasar modal Indonesia dari **Stockbit** dengan arsitektur terpisah:
+1. **Streaming Real-Time Orderbook (Mode 2):** Menangkap antrean 10 level Bid/Offer via **Chrome DevTools Protocol (CDP) WebSocket** dengan *sampling interval* & throttling 30 detik selama jam bursa BEI (`09:55–17:16 WITA`).
+2. **Capture Broker Summary Harian (Mode 1):** Ekstraksi batch rekapitulasi data broker transaksi harian (Buyer & Seller) secara otomatis setiap sore (`17:25 WITA`) ke database MySQL secara transaksional.
 
 ---
 
 ## 📂 Struktur Repositori
 
-Proyek ini terdiri dari dua modul utama:
-
 - **[`backend/`](file:///d:/UserData/user/Code/stockCaptureApp/backend/README.md):**
-  Layanan backend berbasis **Node.js**, **Express.js**, **Puppeteer**, dan **MySQL (`mysql2/promise`)**.
-  - Engine scraping Orderbook & Broker Summary.
-  - REST API untuk memicu scraping dan membaca riwayat snapshot.
-  - Integrasi Windows Task Scheduler untuk capture otomatis harian.
-  - *Silakan baca [backend/README.md](file:///d:/UserData/user/Code/stockCaptureApp/backend/README.md) untuk dokumentasi lengkap konfigurasi, API, dan skema database.*
+  Layanan backend berbasis **Node.js**, **Express.js (ES Modules)**, **Puppeteer (CDP WebSocket)**, dan **MySQL (`mysql2/promise`)**.
+  - Dual Engine: Real-time Orderbook streaming & Batch Broker Summary.
+  - REST API untuk kontrol streaming (`/api/stream/orderbook/start`, `/stop`, `/status`) dan ekstraksi Broksum (`/api/capture/broksum`).
+  - Integrasi Windows Task Scheduler (09:55 WITA untuk Orderbook, 17:25 WITA untuk Broker Summary).
+  - Skema database dengan penanda sesi bursa BEI (`SESSION_1`, `SESSION_2`, `POST_CLOSING`, `AFTER_HOURS`) dan kalkulasi akumulasi/distribusi otomatis.
+  - *Silakan baca [backend/README.md](file:///d:/UserData/user/Code/stockCaptureApp/backend/README.md) untuk dokumentasi lengkap konfigurasi, API, skema database, dan task scheduler.*
 
 - **`frontend/`:**
   Aplikasi web antarmuka pengguna untuk menampilkan visualisasi data pergerakan emiten, antrean orderbook, dan analisis akumulasi/distribusi broker.
 
 ---
 
-## ⚡ Memulai Cepat (Backend)
+## ⚡ Perintah Cepat (Backend)
 
 ```powershell
-# 1. Pindah ke direktori backend
 cd backend
 
-# 2. Pasang dependensi
+# Pasang dependensi
 npm install
 
-# 3. Buat file .env dan jalankan migrasi database
+# Setup env dan migrasi database
 cp .env.example .env
 npm run db:migrate
 
-# 4. Salin cookies login Stockbit ke backend/cookies.json
-
-# 5. Jalankan server pengembangan
+# Jalankan server Express
 npm run dev
-```
 
-Server backend akan aktif di `http://localhost:5000`.
+# Jalankan stream Orderbook manual
+npm run stream:orderbook
+
+# Jalankan capture Broker Summary manual
+npm run capture:broksum
+```
 
 ---
 
 ## 📖 Dokumentasi Lengkap
-Untuk panduan detail mengenai:
-- Skema database (`capture_sessions`, `orderbook_entries`, `broker_summaries`)
-- Format request dan response REST API
-- Setup Windows Task Scheduler harian jam 17:15 WITA
-- Cara export cookies Stockbit dari Google Chrome DevTools
-
 👉 **Buka [Dokumentasi Lengkap Backend (backend/README.md)](file:///d:/UserData/user/Code/stockCaptureApp/backend/README.md)**

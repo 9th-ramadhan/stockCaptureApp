@@ -1,13 +1,15 @@
 {
   "name": "backend",
   "version": "1.0.0",
-  "description": "",
+  "description": "Stockbit Orderbook Real-time Stream & Broker Summary Capture Backend",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "login": "node src/scripts/saveLoginSession.js",
-    "db:migrate": "node database/migrate.js"
+    "db:migrate": "node database/migrate.js",
+    "stream:orderbook": "node src/scripts/runOrderbookStream.js",
+    "capture:broksum": "node src/scripts/runDailyBroksum.js"
   },
   "keywords": [],
   "author": "",

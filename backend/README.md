@@ -1,89 +1,90 @@
 # 📈 Stockbit Data Capture Backend
 
-Backend service berbasis **Node.js**, **Express.js (ES Modules)**, **Puppeteer**, dan **MySQL (`mysql2/promise`)** yang dirancang untuk melakukan scraping otomatis data **Orderbook** dan **Broker Summary** dari [Stockbit](https://stockbit.com), serta menyimpannya ke database MySQL secara transaksional dengan dukungan penjadwalan otomatis (*Windows Task Scheduler*).
+Backend service berbasis **Node.js**, **Express.js (ES Modules)**, **Puppeteer**, **Chrome DevTools Protocol (CDP)**, dan **MySQL (`mysql2/promise`)** yang dirancang untuk:
+1. **Streaming Real-Time Orderbook (Mode 2):** Menangkap antrean Bid/Offer (level 1–10) secara real-time via WebSocket CDP dengan sampling interval & throttling 30 detik selama jam bursa BEI (`09:55–17:16 WITA`).
+2. **Capture Broker Summary Harian (Mode 1):** Ekstraksi batch rekapitulasi data broker transaksi harian (Buyer & Seller) setelah bursa tutup (`17:25 WITA`) dan deduplikasi otomatis per tanggal transaksi.
 
 ---
 
 ## 📑 Daftar Isi
 
 - [Fitur Utama](#-fitur-utama)
-- [Arsitektur Sistem](#-arsitektur-sistem)
+- [Arsitektur Sistem Terpisah (Dual Engine)](#-arsitektur-sistem-terpisah-dual-engine)
 - [Struktur Folder](#-struktur-folder)
 - [Prasyarat Sistem](#-prasyarat-sistem)
-- [Instalasi & Setup Cepat](#-instalasi--setup-cepat)
+- [Instalasi & Migrasi Database](#-instalasi--migrasi-database)
 - [Konfigurasi Environment (.env)](#-konfigurasi-environment-env)
-- [Skema & Migrasi Database](#-skema--migrasi-database)
+- [Skema Database & Relasi](#-skema-database--relasi)
 - [Manajemen Sesi & Cookies Stockbit](#-manajemen-sesi--cookies-stockbit)
 - [Dokumentasi REST API](#-dokumentasi-rest-api)
-- [Otomasi & Windows Task Scheduler](#-otomasi--windows-task-scheduler)
-- [Strategi Web Scraping & DOM Resilience](#-strategi-web-scraping--dom-resilience)
+- [Jadwal Otomasi & Windows Task Scheduler](#-jadwal-otomasi--windows-task-scheduler)
+- [Strategi CDP WebSocket & Throttling 30 Detik](#-strategi-cdp-websocket--throttling-30-detik)
 - [Troubleshooting & Solusi Error](#-troubleshooting--solusi-error)
 
 ---
 
 ## 🌟 Fitur Utama
 
-1. **Scraping Watchlist Otomatis:**
-   - Membaca daftar kode saham secara dinamis langsung dari halaman watchlist pengguna (`https://stockbit.com/watchlist`).
-   - Opsi custom list (scrape hanya daftar emiten tertentu yang dikirim via body request).
-2. **Ekstraksi Data Orderbook Komprehensif:**
-   - Mengambil harga terakhir (*last price*), perubahan poin, dan persentase perubahan (*change %*).
-   - Mengambil antrean Bid & Offer (frekuensi, volume lot, dan level harga).
-3. **Ekstraksi Data Broker Summary (Broksum):**
-   - Mengambil data transaksi Buyer (`BY`) dan Seller (`SL`): kode broker, nilai transaksi (`val`), lot, dan harga rata-rata (*average price*).
-   - Menghitung nilai bersih akumulasi/distribusi (`net_lot` dan `net_value`) secara otomatis pada database.
-   - Normalisasi otomatis singkatan angka bursa Stockbit (`B` = Miliar, `M` = Juta, `K` = Ribu).
-4. **Bulk Insert Transaksional MySQL:**
-   - Menggunakan `BEGIN TRANSACTION`, `COMMIT`, dan `ROLLBACK`. Jika ada kegagalan, data di-rollback sehingga integritas database tetap terjaga.
-5. **Hybrid Daily Runner (Scheduler-Friendly):**
-   - Script runner `runDailyCapture.js` secara cerdas mendeteksi apakah server Express sedang aktif:
-     - Jika server aktif: panggil endpoint REST API `POST /api/capture/watchlist`.
-     - Jika server offline: jalankan workflow Puppeteer + koneksi MySQL mandiri tanpa harus menyalakan server Express.
-6. **Bypass & Anti-Detection:**
-   - Deteksi otomatis path Google Chrome lokal pengguna untuk mengurangi pemblokiran bot/Google OAuth.
-   - Jeda acak (*jitter delay*) 1.5 - 3 detik antar emiten untuk mencegah deteksi bot dan rate limit.
+1. **Streaming Real-Time Orderbook via Chrome DevTools Protocol (CDP):**
+   - Mendengarkan event jaringan `Network.webSocketFrameReceived` langsung dari aliran WebSocket Stockbit.
+   - Dilengkapi **parser adaptif** (JSON/Socket.io text frames) serta **DOM reader fallback aktif** agar seluruh level antrean (1–10) selalu tersinkronisasi presisi di memori (*In-Memory State Map*).
+   - **Throttling 30 Detik:** Timer otomatis melakukan flushing bulk insert ke MySQL hanya ketika terjadi perubahan data (`isDirty = true`), menjaga stabilitas I/O disk database.
+2. **Batch Capture Broker Summary (Broksum) Harian:**
+   - Melewati parsing DOM Orderbook untuk kecepatan ekstraksi maksimal.
+   - Menghitung akumulasi dan distribusi bersih (`net_lot` dan `net_value`) langsung via MySQL Stored Generated Columns.
+   - Deduplikasi otomatis (menghapus data lama pada `stock_code` dan `trade_date` yang sama sebelum insert).
+3. **Pencatatan Sesi Bursa Otomatis (`market_session`):**
+   - Otomatis mengklasifikasikan waktu pengambilan data ke dalam sesi perdagangan BEI zona waktu WITA (`Asia/Makassar`):
+     - `SESSION_1` (Senin–Kamis 10:00–13:00 / Jumat 10:00–12:30 WITA)
+     - `SESSION_2` (Senin–Kamis 14:30–17:00 / Jumat 15:00–17:00 WITA)
+     - `POST_CLOSING` (17:00–17:15 WITA)
+     - `AFTER_HOURS` (Di luar jam bursa & akhir pekan)
+4. **Hybrid Execution (Runner Otomatis):**
+   - Baik `runOrderbookStream.js` maupun `runDailyBroksum.js` otomatis mendeteksi apakah server Express sedang aktif:
+     - Jika Express aktif: memanggil API REST.
+     - Jika Express offline: menjalankan Puppeteer Chromium & database pool secara mandiri.
+5. **Manajemen Jam Bursa & Graceful Shutdown:**
+   - Runner streaming otomatis berhenti saat jam bursa berakhir (`> 17:15 WITA`).
+   - Menerima sinyal `SIGINT`/`SIGTERM` untuk menutup browser dan menyimpan sisa buffer secara bersih.
 
 ---
 
-## 🏗 Arsitektur Sistem
+## 🏗 Arsitektur Sistem Terpisah (Dual Engine)
 
 ```
-┌────────────────────────────────────────────────────────┐
-│               Windows Task Scheduler                   │
-│           (Harian jam 17:15 WITA / 16:15 WIB)          │
-└──────────────────────────┬─────────────────────────────┘
-                           │ (Mengeksekusi run_capture_task.bat)
-                           ▼
-             ┌───────────────────────────┐
-             │  src/scripts/             │
-             │  runDailyCapture.js       │
-             └─────────────┬─────────────┘
-                           │
-             ┌─────────────┴─────────────┐
-             ▼ (Cek Server Status)       ▼
-     [Server Online]             [Server Offline]
-   POST /api/capture/watchlist   Panggil fungsi langsung
-             │                           │
-             └─────────────┬─────────────┘
-                           ▼
-             ┌───────────────────────────┐
-             │  services/                │
-             │  puppeteerService.js      │
-             └─────────────┬─────────────┘
-                           │ 1. Inject cookies.json
-                           │ 2. Scrape Watchlist / Symbol
-                           │ 3. Parse Orderbook & Broksum
-                           ▼
-             ┌───────────────────────────┐
-             │  models/                  │
-             │  stockModel.js            │
-             └─────────────┬─────────────┘
-                           │ Bulk Insert Transaksional
-                           ▼
-             ┌───────────────────────────┐
-             │  MySQL Database           │
-             │  (stock_capture_db)       │
-             └───────────────────────────┘
+                              ┌─────────────────────────────────────────────────────────┐
+                              │                 Windows Task Scheduler                  │
+                              └────────────┬───────────────────────────────┬─────────────┘
+                                           │                               │
+                 (Setiap hari kerja 09:55 WITA)           (Setiap hari kerja 17:25 WITA)
+                                           ▼                               ▼
+                       ┌───────────────────────────────┐ ┌───────────────────────────────┐
+                       │  runOrderbookStream.js        │ │  runDailyBroksum.js           │
+                       │  (run_orderbook_stream.bat)   │ │  (run_broksum_task.bat)       │
+                       └───────────────┬───────────────┘ └───────────────┬───────────────┘
+                                       │                                 │
+                   ┌───────────────────┴───────────────────┐             │
+                   ▼                                       ▼             ▼
+       [CDP WebSocket Listener]                [DOM Reader Fallback]     │ [Scrape Broksum Card]
+                   │                                       │             │
+                   └───────────────────┬───────────────────┘             │
+                                       ▼                                 │
+                       ┌───────────────────────────────┐                 │
+                       │   In-Memory State Map         │                 │
+                       │   (latestOrderbookMap)        │                 │
+                       └───────────────┬───────────────┘                 │
+                                       │ (Interval 30s)                  │
+                                       ▼                                 ▼
+                       ┌───────────────────────────────┐ ┌───────────────────────────────┐
+                       │ saveStockCapture (ORDERBOOK)  │ │ saveStockCapture (BROKSUM)    │
+                       └───────────────┬───────────────┘ └───────────────┬───────────────┘
+                                       │                                 │
+                                       └────────────────┬────────────────┘
+                                                        ▼
+                                       ┌─────────────────────────────────┐
+                                       │       MySQL Database            │
+                                       │       (stock_capture_db)        │
+                                       └─────────────────────────────────┘
 ```
 
 ---
@@ -93,130 +94,110 @@ Backend service berbasis **Node.js**, **Express.js (ES Modules)**, **Puppeteer**
 ```
 backend/
 ├── database/
-│   ├── migrate.js               # Script runner migrasi skema database
-│   └── schema.sql               # Definisi DDL tabel (sessions, orderbook, broksum)
+│   ├── 02_alter_realtime_support.sql  # Migrasi incremental (market_session & index)
+│   ├── migrate.js                     # Runner migrasi otomatis
+│   └── schema.sql                     # Skema dasar DDL lengkap
 ├── logs/
-│   ├── daily_capture.log        # Log aktivitas runner harian
-│   └── task_scheduler.log       # Log output eksekusi Windows Task Scheduler
+│   ├── orderbook_stream.log           # Log aktivitas streaming real-time
+│   ├── daily_broksum.log              # Log aktivitas capture broker summary
+│   └── task_scheduler.log             # Log umum Windows Task Scheduler
 ├── src/
 │   ├── config/
-│   │   └── db.js                # Konfigurasi connection pool mysql2/promise
+│   │   └── db.js                      # MySQL connection pool
 │   ├── controllers/
-│   │   └── stockController.js   # Handler request & response API
+│   │   └── stockController.js         # Handler request API Orderbook stream & Broksum
 │   ├── models/
-│   │   └── stockModel.js        # Operasi transaksi database & bulk insert
+│   │   └── stockModel.js              # Bulk insert transaksional & helper sesi bursa
 │   ├── routes/
-│   │   └── stockRoutes.js       # Definisi endpoint routing Express
+│   │   └── stockRoutes.js             # Definisi rute Express
 │   ├── scripts/
-│   │   ├── runDailyCapture.js   # Script runner otomatis harian
-│   │   └── saveLoginSession.js  # Helper interaktif simpan cookies login
+│   │   ├── runOrderbookStream.js      # Runner penjadwalan Orderbook stream (09:55 WITA)
+│   │   ├── runDailyBroksum.js         # Runner penjadwalan Broker Summary (17:25 WITA)
+│   │   └── saveLoginSession.js        # Helper login interaktif simpan cookies
 │   ├── services/
-│   │   └── puppeteerService.js  # Core engine scraping Puppeteer & parser DOM
-│   └── server.js                # Entry point server Express.js
-├── .env.example                 # Template konfigurasi environment
-├── .gitignore                   # Daftar file yang diabaikan Git
-├── cookies.json                 # File sesi Stockbit aktif (JANGAN DI-COMMIT)
-├── cookies.json.example         # Contoh struktur format cookies.json
-├── package.json                 # Konfigurasi dependencies & npm scripts
-├── README.md                    # Dokumentasi lengkap backend
-└── run_capture_task.bat         # Batch file wrapper untuk Task Scheduler
+│   │   └── puppeteerService.js        # CDP WebSocket engine, throttling & parser
+│   └── server.js                      # HTTP server Express
+├── .env.example                       # Template konfigurasi environment
+├── cookies.json                       # Sesi Stockbit aktif (JANGAN DI-COMMIT)
+├── package.json                       # Dependensi dan npm scripts
+├── run_orderbook_stream.bat           # Wrapper batch Orderbook Task Scheduler
+└── run_broksum_task.bat               # Wrapper batch Broker Summary Task Scheduler
 ```
 
 ---
 
 ## 💻 Prasyarat Sistem
 
-- **Node.js**: Versi `18.x`, `20.x`, atau `22.x+` (Direkomendasikan LTS)
-- **Database**: MySQL Server 8.0+ atau MariaDB 10.4+ (misal via XAMPP)
-- **Browser**: Google Chrome atau browser berbasis Chromium yang terinstal di sistem
-- **OS**: Windows 10/11 (mendukung `.bat` dan Windows Task Scheduler) / Linux / macOS
+- **Node.js**: Versi `18.x`, `20.x`, atau `22.x+`
+- **Database**: MySQL Server 8.0+ atau MariaDB 10.4+
+- **Browser**: Google Chrome atau browser Chromium asli sistem
+- **OS**: Windows 10/11 (mendukung batch Task Scheduler) / Linux / macOS
 
 ---
 
-## 🚀 Instalasi & Setup Cepat
+## 🚀 Instalasi & Migrasi Database
 
-### 1. Masuk ke direktori backend
 ```powershell
+# 1. Pindah ke direktori backend
 cd d:\UserData\user\Code\stockCaptureApp\backend
-```
 
-### 2. Install dependensi
-```powershell
+# 2. Install dependensi
 npm install
-```
 
-### 3. Konfigurasi Environment File
-Salin file `.env.example` menjadi `.env`:
-```powershell
+# 3. Buat file .env dari template
 cp .env.example .env
-```
-Sesuaikan konfigurasi database Anda di dalam `.env`.
 
-### 4. Eksekusi Migrasi Database
-Pastikan layanan MySQL sudah berjalan, lalu jalankan:
-```powershell
+# 4. Jalankan migrasi database
 npm run db:migrate
-```
-Output yang diharapkan:
-```
-⏳ Menjalankan migrasi schema.sql ke MySQL...
-✅ Migrasi berhasil! Database dan seluruh tabel siap digunakan.
-```
 
-### 5. Jalankan Server Backend
-- **Mode Development (Auto-Reload):**
-  ```powershell
-  npm run dev
-  ```
-- **Mode Production:**
-  ```powershell
-  npm start
-  ```
-Server akan aktif di `http://localhost:5000`.
+# 5. Jalankan server pengembangan
+npm run dev
+```
 
 ---
 
 ## ⚙️ Konfigurasi Environment (.env)
 
-| Variabel | Tipe | Nilai Default | Keterangan |
+| Variabel | Tipe | Default | Keterangan |
 |---|---|---|---|
 | `PORT` | Number | `5000` | Port listen server Express |
-| `DB_HOST` | String | `localhost` | Host database MySQL |
-| `DB_PORT` | Number | `3306` | Port database MySQL |
-| `DB_USER` | String | `root` | Username database MySQL |
-| `DB_PASSWORD`| String | `""` | Password user database |
-| `DB_NAME` | String | `stock_capture_db` | Nama database yang digunakan |
-| `COOKIES_PATH`| String | `./cookies.json` | Path file JSON penyimpan cookies login |
-| `CHROME_BIN` | String | *(Auto-detect)* | *(Opsional)* Path kustom binary `chrome.exe` |
+| `DB_HOST` | String | `localhost` | Host MySQL |
+| `DB_PORT` | Number | `3306` | Port MySQL |
+| `DB_USER` | String | `root` | Username MySQL |
+| `DB_PASSWORD` | String | `""` | Password database |
+| `DB_NAME` | String | `stock_capture_db` | Nama database |
+| `COOKIES_PATH`| String | `./cookies.json` | Path file cookies Stockbit |
+| `STREAM_INTERVAL_MS` | Number | `30000` | Interval sampling Orderbook (30 detik) |
+| `MAX_STREAM_SYMBOLS` | Number | `5` | Batas jumlah emiten stream simultan |
+| `DEBUG_WS` | Boolean | `false` | Cetak sampel frame mentah WebSocket ke konsol |
 
 ---
 
-## 🗄 Skema & Migrasi Database
+## 🗄 Skema Database & Relasi
 
-Skema SQL berada pada file [`database/schema.sql`](file:///d:/UserData/user/Code/stockCaptureApp/backend/database/schema.sql).
-
-### Tabel 1: `capture_sessions`
-Mencatat informasi induk setiap kali snapshot pengambilan data saham berlangsung.
+### 1. `capture_sessions`
 ```sql
 CREATE TABLE capture_sessions (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
-    stock_code VARCHAR(10) NOT NULL COMMENT 'Kode emiten, misal: BBCA, BBRI',
+    stock_code VARCHAR(10) NOT NULL,
     capture_type ENUM('ORDERBOOK', 'BROKSUM', 'BOTH') NOT NULL,
+    market_session ENUM('SESSION_1', 'SESSION_2', 'POST_CLOSING', 'AFTER_HOURS') NOT NULL DEFAULT 'AFTER_HOURS',
     last_price INT UNSIGNED DEFAULT NULL,
     price_change_pct DECIMAL(6, 2) DEFAULT NULL,
     captured_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_stock_time (stock_code, captured_at)
+    INDEX idx_stock_time (stock_code, captured_at),
+    INDEX idx_market_session (market_session, captured_at)
 );
 ```
 
-### Tabel 2: `orderbook_entries`
-Mencatat detail antrean orderbook per level kedalaman harga.
+### 2. `orderbook_entries`
+Menyimpan antrean bid & offer per level (1–10).
 ```sql
 CREATE TABLE orderbook_entries (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
     session_id BIGINT UNSIGNED NOT NULL,
     stock_code VARCHAR(10) NOT NULL,
-    level_order TINYINT UNSIGNED NOT NULL COMMENT '1 = Best Bid / Best Offer',
+    level_order TINYINT UNSIGNED NOT NULL COMMENT '1 = Best Bid / Offer',
     bid_freq INT UNSIGNED DEFAULT 0,
     bid_lot BIGINT UNSIGNED DEFAULT 0,
     bid_price INT UNSIGNED DEFAULT NULL,
@@ -229,8 +210,8 @@ CREATE TABLE orderbook_entries (
 );
 ```
 
-### Tabel 3: `broker_summaries`
-Mencatat rekapitulasi data broker transaksi harian.
+### 3. `broker_summaries`
+Menyimpan rekapitulasi data broker transaksi harian dengan kalkulasi net otomatis.
 ```sql
 CREATE TABLE broker_summaries (
     id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -245,13 +226,14 @@ CREATE TABLE broker_summaries (
     sell_lot BIGINT UNSIGNED DEFAULT 0,
     sell_value DECIMAL(18, 2) DEFAULT 0.00,
     avg_sell_price DECIMAL(10, 2) DEFAULT 0.00,
-    -- Kolom terhitung otomatis (Virtual / Stored Column):
+    is_daily_final TINYINT(1) NOT NULL DEFAULT 1,
     net_lot BIGINT GENERATED ALWAYS AS (CAST(buy_lot AS SIGNED) - CAST(sell_lot AS SIGNED)) STORED,
     net_value DECIMAL(18, 2) GENERATED ALWAYS AS (buy_value - sell_value) STORED,
     captured_at DATETIME NOT NULL,
     FOREIGN KEY (session_id) REFERENCES capture_sessions(id) ON DELETE CASCADE,
     INDEX idx_bs_stock_date (stock_code, trade_date),
-    INDEX idx_bs_broker (broker_code, trade_date)
+    INDEX idx_bs_broker (broker_code, trade_date),
+    INDEX idx_bs_stock_date_broker (stock_code, trade_date, broker_code)
 );
 ```
 
@@ -259,27 +241,21 @@ CREATE TABLE broker_summaries (
 
 ## 🍪 Manajemen Sesi & Cookies Stockbit
 
-Stockbit mewajibkan autentikasi akun untuk melihat data **Watchlist** privat dan **Broker Summary**. Sesi disimpan dalam file `backend/cookies.json`.
+Stockbit mewajibkan sesi login untuk data Watchlist dan Broker Summary.
 
-### Cara Export Cookies dari Google Chrome (Sangat Disarankan)
-Karena Google memblokir login OAuth di lingkungan automated browser ("*This browser or app may not be secure*"), cara paling stabil adalah mengekspor cookies dari browser Chrome yang biasa Anda gunakan:
-
-1. Buka browser Chrome biasa dan login ke [https://stockbit.com](https://stockbit.com).
-2. Tekan `F12` untuk membuka **Chrome DevTools**.
-3. Masuk ke tab **Console**, lalu tempel (*paste*) kode berikut dan tekan `Enter`:
+### Export Cookies Cepat via Chrome DevTools:
+1. Buka browser Chrome dan login ke [https://stockbit.com](https://stockbit.com).
+2. Tekan `F12` lalu buka tab **Console**.
+3. Jalankan kode berikut:
    ```javascript
    const cookies = document.cookie.split('; ').map(c => {
      const [name, ...rest] = c.split('=');
      return { name: name.trim(), value: rest.join('='), domain: '.stockbit.com', path: '/' };
    });
    copy(JSON.stringify(cookies, null, 2));
-   console.log('✅ Cookies berhasil disalin ke clipboard! Total:', cookies.length);
+   console.log('✅ Cookies tersalin ke clipboard!', cookies.length, 'cookies');
    ```
-4. Buka file `backend/cookies.json` di editor Anda, lalu paste isi clipboard.
-5. Selesai. Puppeteer akan otomatis memuat file ini.
-
-> [!TIP]
-> Cookie krusial yang menentukan status login adalah `credentialStorage` (berisi JSON web token) dan `sb_is_social_logged_in`. Sesi ini bertahan sekitar 7-30 hari tergantung masa aktif token Stockbit.
+4. Tempel (*paste*) isi clipboard ke file `backend/cookies.json`.
 
 ---
 
@@ -287,180 +263,99 @@ Karena Google memblokir login OAuth di lingkungan automated browser ("*This brow
 
 Base URL: `http://localhost:5000/api`
 
-### 1. Health Check
-Memeriksa status service Express backend.
-- **Method:** `GET`
-- **URL:** `/health`
-- **Response (200 OK):**
-  ```json
-  {
-    "status": "OK",
-    "message": "Backend Stock Capture (Puppeteer + MySQL) siap digunakan",
-    "timestamp": "2026-11-24T12:00:00.000Z"
-  }
-  ```
+### 1. Streaming Real-Time Orderbook (Mode 2)
 
-### 2. Database Connection Check
-Memeriksa koneksi langsung ke server database MySQL.
-- **Method:** `GET`
-- **URL:** `/db-check`
-- **Response (200 OK):**
-  ```json
-  {
-    "status": "connected",
-    "data": {
-      "waktu_server": "2026-11-24T12:00:00.000Z",
-      "nama_db": "stock_capture_db"
-    }
-  }
-  ```
-
----
-
-### 3. Capture Watchlist
-Mengeksekusi workflow scraping seluruh atau sebagian emiten pada watchlist.
-- **Method:** `POST`
-- **URL:** `/capture/watchlist`
-- **Headers:** `Content-Type: application/json`
+#### `POST /stream/orderbook/start`
+Memulai streaming antrean Orderbook via CDP WebSocket.
 - **Request Body (Opsional):**
   ```json
   {
-    "symbols": ["BBCA", "BBRI", "TLKM"],  // Kosongkan untuk scrape seluruh watchlist
-    "limit": 10,                            // Batasi jumlah emiten yang diproses
-    "headless": true                        // Default: true
-  }
-  ```
-- **Response Sukses (200 OK):**
-  ```json
-  {
-    "status": "success",
-    "message": "Proses capture watchlist selesai",
-    "data": {
-      "totalProcessed": 3,
-      "successCount": 3,
-      "failedCount": 0,
-      "results": [
-        {
-          "stockCode": "BBCA",
-          "status": "success",
-          "sessionId": 14,
-          "orderbookRows": 1,
-          "broksumRows": 47
-        }
-      ]
-    }
-  }
-  ```
-- **Response Jika Belum Login (401 Unauthorized):**
-  ```json
-  {
-    "status": "error",
-    "requiresLogin": true,
-    "message": "Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses halaman Watchlist."
-  }
-  ```
-
----
-
-### 4. Capture Emiten Tunggal
-Melakukan scraping data untuk 1 kode saham spesifik.
-- **Method:** `POST`
-- **URL:** `/capture/symbol/:symbol`
-- **Request Body (Opsional):**
-  ```json
-  {
+    "symbols": ["BBCA", "BBRI", "TLKM"], // Kosongkan untuk pakai watchlist
+    "intervalSeconds": 30,                // Sampling throttling (default: 30)
     "headless": true
   }
   ```
-- **Contoh Request:** `POST /api/capture/symbol/BBCA`
-- **Response Sukses (200 OK):**
+- **Response (200 OK):**
   ```json
   {
     "status": "success",
-    "message": "Berhasil menangkap dan menyimpan data emiten BBCA",
     "data": {
-      "sessionId": 17,
-      "stockCode": "BBCA",
-      "captureType": "BOTH",
-      "insertedOrderbookCount": 1,
-      "insertedBroksumCount": 48
+      "status": "started",
+      "message": "Streaming real-time Orderbook berhasil dimulai",
+      "monitoredSymbols": ["BBCA", "BBRI", "TLKM"],
+      "intervalSeconds": 30,
+      "startTime": "2026-11-24T02:00:00.000Z"
+    }
+  }
+  ```
+
+#### `POST /stream/orderbook/stop`
+Menghentikan layanan streaming Orderbook secara aman.
+- **Response (200 OK):**
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "status": "stopped",
+      "message": "Layanan streaming Orderbook telah dihentikan",
+      "totalSessionsSaved": 48,
+      "lastFlushTime": "2026-11-24T09:15:00.000Z"
+    }
+  }
+  ```
+
+#### `GET /stream/orderbook/status`
+Memeriksa status aktif streaming.
+- **Response (200 OK):**
+  ```json
+  {
+    "status": "success",
+    "data": {
+      "isRunning": true,
+      "monitoredSymbols": ["BBCA", "BBRI"],
+      "intervalSeconds": 30,
+      "startTime": "2026-11-24T02:00:00.000Z",
+      "lastFlushTime": "2026-11-24T02:05:30.000Z",
+      "totalSessionsSaved": 12,
+      "activeTabs": 2,
+      "marketSession": "SESSION_1"
     }
   }
   ```
 
 ---
 
-### 5. Riwayat Capture Sessions
-Mengambil daftar riwayat sesi penangkapan data dari database.
-- **Method:** `GET`
-- **URL:** `/sessions`
-- **Query Parameters:**
-  - `limit`: Jumlah data (default: 20)
-  - `offset`: Offset paginasi (default: 0)
-  - `stockCode`: Filter berdasarkan kode saham (contoh: `?stockCode=BBCA`)
-- **Response Sukses (200 OK):**
+### 2. Capture Broker Summary (Mode 1)
+
+#### `POST /capture/broksum`
+Scraping khusus data Broker Summary harian.
+- **Request Body (Opsional):**
   ```json
   {
-    "status": "success",
-    "count": 1,
-    "data": [
-      {
-        "id": 16,
-        "stock_code": "BBRI",
-        "capture_type": "BOTH",
-        "last_price": 3100,
-        "price_change_pct": "0.00",
-        "captured_at": "2026-11-17T14:20:00.000Z",
-        "total_orderbook_rows": 1,
-        "total_broksum_rows": 50
-      }
-    ]
+    "symbols": ["BBCA", "BBRI"],
+    "limit": 10,
+    "headless": true
   }
   ```
-
----
-
-### 6. Detail Capture Session
-Mengambil snapshot lengkap satu sesi termasuk seluruh array Orderbook dan Broker Summary.
-- **Method:** `GET`
-- **URL:** `/sessions/:id`
-- **Contoh Request:** `GET /api/sessions/16`
-- **Response Sukses (200 OK):**
+- **Response (200 OK):**
   ```json
   {
     "status": "success",
+    "message": "Proses capture Broker Summary selesai",
     "data": {
-      "session": {
-        "id": 16,
-        "stock_code": "BBRI",
-        "capture_type": "BOTH",
-        "last_price": 3100,
-        "price_change_pct": "0.00",
-        "captured_at": "2026-11-17T14:20:00.000Z"
-      },
-      "orderbook": [
+      "success": true,
+      "captureType": "BROKSUM",
+      "durationSeconds": 14.2,
+      "totalProcessed": 2,
+      "successCount": 2,
+      "failedCount": 0,
+      "successList": [
         {
-          "level_order": 1,
-          "bid_freq": 120,
-          "bid_lot": 45000,
-          "bid_price": 3090,
-          "offer_price": 3100,
-          "offer_lot": 62000,
-          "offer_freq": 145
-        }
-      ],
-      "broker_summary": [
-        {
-          "broker_code": "YP",
-          "broker_category": "UNKNOWN",
-          "buy_lot": 25000,
-          "buy_value": 77500000.00,
-          "avg_buy_price": 3100.00,
-          "sell_lot": 10000,
-          "sell_value": 31000000.00,
-          "avg_sell_price": 3100.00,
-          "net_lot": 15000,
-          "net_value": 46500000.00
+          "symbol": "BBCA",
+          "lastPrice": 5500,
+          "tradeDate": "2026-11-24",
+          "broksumCount": 48,
+          "sessionId": 29
         }
       ]
     }
@@ -469,88 +364,60 @@ Mengambil snapshot lengkap satu sesi termasuk seluruh array Orderbook dan Broker
 
 ---
 
-### 7. Trigger Interactive Login Session
-Membuka browser berbasis UI untuk login manual ke Stockbit.
-- **Method:** `POST`
-- **URL:** `/auth/save-session`
+### 3. Riwayat Sesi Database
+
+#### `GET /sessions`
+Daftar riwayat sesi.
+- **Query Params:** `?limit=20&offset=0&stockCode=BBCA`
+
+#### `GET /sessions/:id`
+Detail snapshot Orderbook dan Broker Summary lengkap suatu sesi.
 
 ---
 
-## ⏰ Otomasi & Windows Task Scheduler
+## ⏰ Jadwal Otomasi & Windows Task Scheduler
 
-Service ini dilengkapi automasi batch script untuk mengeksekusi scraping secara terjadwal setiap sore setelah penutupan bursa IHSG (contoh: **17:15 WITA / 16:15 WIB**).
+Kedua tugas scraping dipisahkan secara independen ke dalam jadwal Task Scheduler:
 
-### Komponen Otomasi:
-1. **`run_capture_task.bat`**: Mengatur environment `PATH` Node.js, berpindah ke direktori proyek, dan mengarahkan output log ke `logs/task_scheduler.log`.
-2. **`src/scripts/runDailyCapture.js`**:
-   - Menghubungi `/api/health` untuk mendeteksi apakah server backend aktif.
-   - Jika aktif, memicu endpoint `/api/capture/watchlist`.
-   - Jika tidak aktif, menjalankan *in-process headless Puppeteer engine* secara mandiri dan menutup pool database setelah selesai.
+| Tugas | Skrip Runner | File Batch | Waktu Eksekusi |
+|---|---|---|---|
+| **Real-time Orderbook Stream** | `src/scripts/runOrderbookStream.js` | `run_orderbook_stream.bat` | **Setiap hari kerja pukul 09:55 WITA** (berhenti otomatis 17:16 WITA) |
+| **Final Broker Summary** | `src/scripts/runDailyBroksum.js` | `run_broksum_task.bat` | **Setiap hari kerja pukul 17:25 WITA** (setelah rekap harian final bursa) |
 
-### Cara Mendaftarkan Task di Windows Task Scheduler
-
-Buka **PowerShell as Administrator**, lalu jalankan perintah berikut:
+### Pendaftaran Otomatis via PowerShell (Administrator):
 
 ```powershell
-$action = New-ScheduledTaskAction -Execute "cmd.exe" -Argument '/c "d:\UserData\user\Code\stockCaptureApp\backend\run_capture_task.bat"'
-$trigger = New-ScheduledTaskTrigger -Daily -At "17:15"
-$settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
-Register-ScheduledTask -TaskName "StockbitDailyCaptureWatchlist" -Action $action -Trigger $trigger -Settings $settings -Description "Auto capture watchlist Stockbit harian setelah tutup bursa"
-```
+# 1. Daftarkan Task Real-Time Orderbook Stream (09:55 WITA)
+$actionOb = New-ScheduledTaskAction -Execute "cmd.exe" -Argument '/c "d:\UserData\user\Code\stockCaptureApp\backend\run_orderbook_stream.bat"'
+$triggerOb = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "09:55"
+$settingsOb = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName "StockbitRealtimeOrderbookStream" -Action $actionOb -Trigger $triggerOb -Settings $settingsOb -Description "Stream Orderbook via CDP WebSocket jam bursa"
 
-### Cara Verifikasi Status Task Scheduler:
-```powershell
-# Cek info jadwal task
-Get-ScheduledTask -TaskName "StockbitDailyCaptureWatchlist" | Get-ScheduledTaskInfo
-
-# Jalankan manual untuk tes
-Start-ScheduledTask -TaskName "StockbitDailyCaptureWatchlist"
-
-# Periksa log hasil eksekusi
-Get-Content d:\UserData\user\Code\stockCaptureApp\backend\logs\task_scheduler.log -Tail 30
+# 2. Daftarkan Task Broker Summary Harian (17:25 WITA)
+$actionBs = New-ScheduledTaskAction -Execute "cmd.exe" -Argument '/c "d:\UserData\user\Code\stockCaptureApp\backend\run_broksum_task.bat"'
+$triggerBs = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At "17:25"
+$settingsBs = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
+Register-ScheduledTask -TaskName "StockbitDailyBrokerSummary" -Action $actionBs -Trigger $triggerBs -Settings $settingsBs -Description "Capture Broker Summary harian setelah tutup bursa"
 ```
 
 ---
 
-## 🛡 Strategi Web Scraping & DOM Resilience
+## 🛡 Strategi CDP WebSocket & Throttling 30 Detik
 
-Stockbit dibangun menggunakan React dan *styled-components* dengan hash CSS class dinamis (misal: `sc-f2987433-0`). Layanan ini menggunakan strategi selektor tahan perubahan:
-
-1. **Navigasi `domcontentloaded` (Bukan `networkidle2`):**
-   Stockbit memiliki persistent WebSocket connection untuk data streaming realtime. Menggunakan `networkidle2` akan memicu `TimeoutError`. Solusinya adalah menunggu event `domcontentloaded` lalu melakukan `waitForSelector` pada elemen kontainer spesifik.
-2. **Anchor Teks & Struktur Kolom:**
-   - Orderbook diidentifikasi melalui struktur kartu yang memiliki header kolom `Freq`, `Lot`, `Bid`, `Offer`.
-   - Broker Summary diidentifikasi melalui header teks `Broker Summary` dan header kolom `BY`, `B.val`, `SL`, `S.val`.
-3. **Pembersihan dan Konversi Angka Bursa:**
-   - String `12.5B` dikonversi menjadi `12500000000` (dikalikan $10^9$).
-   - String `350M` dikonversi menjadi `350000000` (dikalikan $10^6$).
-   - String `45.2K` dikonversi menjadi `45200` (dikalikan $10^3$).
-   - String `-` atau `n/a` dikonversi menjadi `0`.
-4. **Resilient Watchlist Parser:**
-   Mengambil kode saham dari atribut link `a[href*="/symbol/"]` pada tabel watchlist, menghindari kegagalan parsing jika styling atau struktur sel tabel mengalami perubahan kecil.
+1. **Efisiensi Memori & Bandwidth:**
+   Saat membuka tab emiten untuk streaming, resource berat seperti gambar (`image`), font (`font`), dan media otomatis diblokir via `setRequestInterception(true)`.
+2. **Kombinasi CDP Frame + DOM Observer:**
+   Stockbit memancarkan data harga dan tick transaksi via WebSocket. Parser mendengarkan event frame dan memperbarui state di memori. Jika terjadi perubahan tick atau perbedaan DOM pada antrean level 1–10, flag `isDirty` diaktifkan.
+3. **Penyimpanan Berkala (Throttling 30 Detik):**
+   Alih-alih melakukan penulisan database pada setiap tick milidetik yang menyebabkan lonjakan CPU/Disk, sistem melakukan *sampling snapshot* setiap 30 detik. Hanya emiten yang mengalami perubahan data yang disimpan ke database.
 
 ---
 
 ## 🔧 Troubleshooting & Solusi Error
 
-### 1. `TimeoutError: Waiting for selector 'tbody.ant-table-tbody' failed`
-- **Penyebab:** Sesi login kedaluwarsa atau file `cookies.json` belum diisi, sehingga Stockbit melakukan redirect ke halaman `/login`.
-- **Solusi:** Perbarui `cookies.json` dengan cara export cookies dari Chrome DevTools sesuai panduan [Manajemen Sesi & Cookies Stockbit](#-manajemen-sesi--cookies-stockbit).
-
-### 2. Google OAuth: *"Couldn't sign you in - This browser or app may not be secure"*
-- **Penyebab:** Google memproteksi form login jika dijalankan melalui Chromium test binary bawaan Puppeteer.
-- **Solusi:** Jangan lakukan login Google via script otomatis. Loginlah di Google Chrome biasa Anda, lalu salin `document.cookie` ke `cookies.json`.
-
-### 3. `ECONNREFUSED 127.0.0.1:3306`
-- **Penyebab:** MySQL Server belum menyala atau port berbeda.
-- **Solusi:** Pastikan MySQL di XAMPP / Windows Service sudah dalam status **Running**, dan cek nilai `DB_PORT` serta `DB_PASSWORD` di `.env`.
-
-### 4. Task Scheduler `LastTaskResult: 267009` atau `node: command not found`
-- **Penyebab:** Environment Windows Task Scheduler tidak mewarisi `PATH` dari user profil yang memuat direktori instalasi Node.js.
-- **Solusi:** `run_capture_task.bat` sudah dilengkapi `set PATH=D:\DevTools\nodejs;%PATH%`. Pastikan path Node.js pada file batch tersebut sesuai dengan path instalasi Node.js di komputer Anda.
-
----
-
-## 📄 Lisensi
-
-ISC License. Proyek ini dikembangkan untuk kebutuhan internal analisis data transaksi bursa efek.
+- **Status `AFTER_HOURS` di luar jam bursa:**
+  Perilaku normal jika pengujian dilakukan di luar jam 10:00–17:15 WITA atau pada hari Sabtu/Minggu.
+- **Cookies Expired / Halaman Watchlist Timeout:**
+  Buka Chrome, login ke Stockbit, dan perbarui isi `backend/cookies.json` dengan `copy(document.cookie)`.
+- **Port Conflict (EADDRINUSE: 5000):**
+  Ubah `PORT=5001` di file `.env` jika port 5000 sedang digunakan oleh aplikasi lain.
