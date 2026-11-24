@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import {
   handleCaptureBroksum,
+  handleCaptureOrderbook,
   handleStartOrderbookStream,
   handleStopOrderbookStream,
   handleGetStreamStatus,
@@ -25,9 +26,15 @@ router.post('/stream/orderbook/stop', handleStopOrderbookStream);
 // Mengambil status aktivitas streaming real-time Orderbook
 router.get('/stream/orderbook/status', handleGetStreamStatus);
 
+// Eksekusi snapshot Orderbook terakhir (Fallback di luar jam bursa / On-Demand)
+router.post('/stream/orderbook/snapshot', handleCaptureOrderbook);
+
 // ============================================================================
-// 2. ENDPOINTS CAPTURE BROKER SUMMARY (MODE 1 - BATCH HARIAN)
+// 2. ENDPOINTS CAPTURE KHUSUS ORDERBOOK & BROKER SUMMARY (BATCH / SNAPSHOT)
 // ============================================================================
+// Eksekusi scraping snapshot Orderbook terakhir
+router.post('/capture/orderbook', handleCaptureOrderbook);
+
 // Eksekusi scraping khusus Broker Summary (melewati parsing Orderbook)
 router.post('/capture/broksum', handleCaptureBroksum);
 

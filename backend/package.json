@@ -9,6 +9,7 @@
     "login": "node src/scripts/saveLoginSession.js",
     "db:migrate": "node database/migrate.js",
     "stream:orderbook": "node src/scripts/runOrderbookStream.js",
+    "capture:orderbook": "node src/scripts/runOrderbookSnapshot.js",
     "capture:broksum": "node src/scripts/runDailyBroksum.js"
   },
   "keywords": [],

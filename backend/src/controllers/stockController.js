@@ -3,6 +3,7 @@ import {
   captureSingleStock,
   saveLoginSession,
   captureBrokerSummaryOnly,
+  captureOrderbookSnapshotOnly,
   startRealtimeOrderbookStream,
   stopRealtimeOrderbookStream,
   getRealtimeOrderbookStatus,
@@ -12,6 +13,52 @@ import {
   getSessions,
   getSessionDetail,
 } from '../models/stockModel.js';
+
+/**
+ * Controller: Menjalankan capture snapshot Orderbook terakhir (Fallback di luar jam bursa / On-Demand)
+ * POST /api/capture/orderbook
+ * Body (opsional):
+ * {
+ *   "symbols": ["BBCA", "BBRI"],
+ *   "limit": 10,
+ *   "headless": true
+ * }
+ */
+export async function handleCaptureOrderbook(req, res) {
+  try {
+    const { symbols, limit, headless = true } = req.body || {};
+    console.log('📥 Menerima permintaan POST /api/capture/orderbook (Snapshot)...');
+
+    const result = await captureOrderbookSnapshotOnly(
+      Array.isArray(symbols) && symbols.length > 0 ? symbols : [],
+      {
+        limit: limit ? Number(limit) : null,
+        headless: headless !== false,
+      }
+    );
+
+    return res.status(200).json({
+      status: 'success',
+      message: 'Proses capture snapshot Orderbook selesai',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Error pada handleCaptureOrderbook:', error.message);
+    const isAuthError =
+      error.message.includes('cookies.json') ||
+      error.message.includes('login') ||
+      error.message.includes('Sesi');
+
+    return res.status(isAuthError ? 401 : 500).json({
+      status: 'error',
+      requiresLogin: isAuthError,
+      message: isAuthError
+        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses Orderbook.'
+        : 'Gagal menjalankan capture snapshot Orderbook',
+      error: error.message,
+    });
+  }
+}
 
 /**
  * Controller: Menjalankan capture khusus Broker Summary (Mode 1 Batch Harian)
