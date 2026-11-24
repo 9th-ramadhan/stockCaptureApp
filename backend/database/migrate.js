@@ -12,24 +12,37 @@ dotenv.config({ path: path.resolve(__dirname, '../.env') });
 async function runMigration() {
   let connection;
   try {
-    // 1. Buat koneksi tanpa menentukan database terlebih dahulu (karena schema.sql akan membuatnya)
+    // 1. Buat koneksi tanpa menentukan database terlebih dahulu
     connection = await mysql.createConnection({
       host: process.env.DB_HOST || 'localhost',
+      port: Number(process.env.DB_PORT) || 3306,
       user: process.env.DB_USER || 'root',
       password: process.env.DB_PASSWORD || '',
       multipleStatements: true, // Wajib aktif agar bisa mengeksekusi banyak query sekaligus
     });
 
-    // 2. Baca isi file schema.sql
+    console.log('🔄 Memulai proses migrasi database...');
+
+    // 2. Eksekusi file schema.sql (Tabel Dasar)
     const schemaPath = path.join(__dirname, 'schema.sql');
-    const sqlQuery = await fs.readFile(schemaPath, 'utf-8');
+    const sqlSchema = await fs.readFile(schemaPath, 'utf-8');
+    console.log('⏳ Menjalankan database/schema.sql...');
+    await connection.query(sqlSchema);
+    console.log('✅ schema.sql berhasil dieksekusi.');
 
-    console.log('⏳ Menjalankan migrasi schema.sql ke MySQL...');
+    // 3. Cari dan eksekusi file migrasi alter bertahap (misal: 02_alter_realtime_support.sql)
+    const files = await fs.readdir(__dirname);
+    const alterFiles = files.filter((f) => f.endsWith('.sql') && f !== 'schema.sql').sort();
 
-    // 3. Eksekusi seluruh query SQL
-    await connection.query(sqlQuery);
+    for (const file of alterFiles) {
+      const filePath = path.join(__dirname, file);
+      console.log(`⏳ Menjalankan migrasi incremental: ${file}...`);
+      const sqlAlter = await fs.readFile(filePath, 'utf-8');
+      await connection.query(sqlAlter);
+      console.log(`✅ ${file} berhasil dieksekusi.`);
+    }
 
-    console.log('✅ Migrasi berhasil! Database dan seluruh tabel siap digunakan.');
+    console.log('🎉 Seluruh migrasi database selesai dan siap digunakan!');
   } catch (error) {
     console.error('❌ Gagal menjalankan migrasi:', error.message);
     process.exit(1);
