@@ -2,6 +2,7 @@
 
 Backend service berbasis **Node.js**, **Express.js (ES Modules)**, **Puppeteer**, **Chrome DevTools Protocol (CDP)**, dan **MySQL (`mysql2/promise`)** yang dirancang untuk:
 1. **Streaming Real-Time Orderbook (Mode 2):** Menangkap antrean Bid/Offer (level 1–10) secara real-time via WebSocket CDP dengan sampling interval & throttling 30 detik selama jam bursa BEI (`09:55–17:16 WITA`).
+   - **Mekanisme Fallback Otomatis:** Apabila runner `stream:orderbook` dipaksa dijalankan di luar jam operasional (misal malam hari atau akhir pekan), sistem otomatis mendeteksi status `isPastClosingTime()` dan beralih menjalankan **capture snapshot Orderbook terakhir** (melewati streaming berkelanjutan) lalu menyimpannya ke database dengan status sesi `AFTER_HOURS`.
 2. **Capture Broker Summary Harian (Mode 1):** Ekstraksi batch rekapitulasi data broker transaksi harian (Buyer & Seller) setelah bursa tutup (`17:25 WITA`) dan deduplikasi otomatis per tanggal transaksi.
 
 ---
@@ -356,6 +357,41 @@ Scraping khusus data Broker Summary harian.
           "tradeDate": "2026-11-24",
           "broksumCount": 48,
           "sessionId": 29
+        }
+      ]
+    }
+  }
+  ```
+
+#### `POST /capture/orderbook` (Snapshot / Fallback)
+Scraping snapshot Orderbook terakhir untuk seluruh/sebagian emiten (digunakan saat runner streaming dipaksa berjalan di luar jam bursa atau on-demand).
+- **Request Body (Opsional):**
+  ```json
+  {
+    "symbols": ["BBCA", "BBRI"],
+    "limit": 10,
+    "headless": true
+  }
+  ```
+- **Response (200 OK):**
+  ```json
+  {
+    "status": "success",
+    "message": "Proses capture snapshot Orderbook selesai",
+    "data": {
+      "success": true,
+      "captureType": "ORDERBOOK",
+      "isFallback": true,
+      "totalProcessed": 2,
+      "successCount": 2,
+      "failedCount": 0,
+      "successList": [
+        {
+          "symbol": "BBCA",
+          "lastPrice": 5500,
+          "marketSession": "AFTER_HOURS",
+          "orderbookCount": 10,
+          "sessionId": 31
         }
       ]
     }
