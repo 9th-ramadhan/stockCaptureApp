@@ -3,13 +3,14 @@ import fs from 'fs/promises';
 import fsSync from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { saveStockCapture, getMarketSession } from '../models/stockModel.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 /**
  * Deteksi path Google Chrome reguler di sistem pengguna (Windows/Linux/Mac)
- * Menggunakan Chrome asli dapat menghindari blokir keamanan Google OAuth ("This browser or app may not be secure")
+ * Menggunakan Chrome asli sistem untuk kestabilan dan bypass proteksi automasi
  */
 function findChromeExecutable() {
   const candidates = [
@@ -18,8 +19,8 @@ function findChromeExecutable() {
     'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
     process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Google\\Chrome\\Application\\chrome.exe') : null,
     'C:\\Program Files\\BraveSoftware\\Brave-Browser\\Application\\brave.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
     'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
   ].filter(Boolean);
 
   for (const p of candidates) {
@@ -36,7 +37,7 @@ function findChromeExecutable() {
 const DEFAULT_COOKIES_PATHS = [
   process.env.COOKIES_PATH,
   path.resolve(__dirname, '../../cookies.json'), // backend/cookies.json
-  path.resolve(process.cwd(), 'cookies.json'),   // root/cookies.json
+  path.resolve(process.cwd(), 'cookies.json'), // root/cookies.json
   path.resolve(process.cwd(), 'backend/cookies.json'),
 ].filter(Boolean);
 
@@ -102,7 +103,6 @@ export function parseAbbreviatedNumber(rawValue) {
     } else if (cleaned.includes('.')) {
       const parts = cleaned.split('.');
       if (parts.length > 2 || (parts.length === 2 && parts[1].length === 3)) {
-        // Titik sebagai pemisah ribuan (misal: 1.250 atau 1.000.000)
         cleaned = cleaned.replace(/\./g, '');
       }
     } else if (cleaned.includes(',')) {
@@ -115,7 +115,6 @@ export function parseAbbreviatedNumber(rawValue) {
     }
   }
 
-  // Hapus karakter non-numerik yang tersisa kecuali titik desimal
   cleaned = cleaned.replace(/[^0-9.]/g, '');
   const parsed = parseFloat(cleaned);
   if (isNaN(parsed)) return 0;
@@ -137,8 +136,6 @@ export function parseTradeDate(rawDateStr) {
   }
 
   const str = rawDateStr.trim();
-
-  // Jika sudah format YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(str)) {
     return str;
   }
@@ -149,21 +146,16 @@ export function parseTradeDate(rawDateStr) {
     okt: '10', oct: '10', nov: '11', des: '12', dec: '12',
   };
 
-  // Cocokkan pola: "16 Nov 26" atau "16 Nov 2026" atau rentang "16 Nov 26 - 16 Nov 26"
-  // Ambil tanggal pertama atau satu-satunya yang cocok
   const match = str.match(/(\d{1,2})\s+([A-Za-z]{3,9})\s+(\d{2,4})/);
   if (match) {
     const day = match[1].padStart(2, '0');
     const monthKey = match[2].toLowerCase().slice(0, 3);
     const month = monthMap[monthKey] || '01';
     let year = match[3];
-    if (year.length === 2) {
-      year = `20${year}`;
-    }
+    if (year.length === 2) year = `20${year}`;
     return `${year}-${month}-${day}`;
   }
 
-  // Pola DD/MM/YYYY
   const slashMatch = str.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
   if (slashMatch) {
     const day = slashMatch[1].padStart(2, '0');
@@ -173,18 +165,15 @@ export function parseTradeDate(rawDateStr) {
     return `${year}-${month}-${day}`;
   }
 
-  // Fallback: gunakan tanggal hari ini
   return new Date().toISOString().slice(0, 10);
 }
 
 /**
- * Normalisasi berbagai format cookies (Array, Object key-value, atau raw cookie string)
- * menjadi format array cookie yang valid untuk Puppeteer.
+ * Normalisasi berbagai format cookies menjadi format array Puppeteer
  */
 function normalizeCookies(data) {
   if (!data) return [];
 
-  // Jika sudah berupa Array objek Puppeteer [{ name, value, ... }]
   if (Array.isArray(data)) {
     return data
       .filter((c) => c && c.name && c.value !== undefined)
@@ -198,7 +187,6 @@ function normalizeCookies(data) {
       }));
   }
 
-  // Jika berupa Object key-value: { "credentialStorage": "...", "sb_is_social_logged_in": "y" }
   if (typeof data === 'object' && data !== null) {
     return Object.entries(data).map(([name, value]) => ({
       name: String(name).trim(),
@@ -208,7 +196,6 @@ function normalizeCookies(data) {
     }));
   }
 
-  // Jika berupa string mentah: "credentialStorage=...; sb_is_social_logged_in=y"
   if (typeof data === 'string') {
     return data
       .split(';')
@@ -230,7 +217,6 @@ function normalizeCookies(data) {
 
 /**
  * Membaca session cookies dari file JSON atau teks
- * @returns {Promise<Array<Object>|null>}
  */
 export async function loadCookies() {
   for (const cookiePath of DEFAULT_COOKIES_PATHS) {
@@ -242,21 +228,18 @@ export async function loadCookies() {
       try {
         parsed = JSON.parse(content);
       } catch {
-        // Jika bukan format JSON, coba parse sebagai cookie string biasa
         parsed = content;
       }
 
       const normalized = normalizeCookies(parsed);
       if (normalized.length > 0) {
-        console.log(`🍪 Berhasil membaca cookies dari ${cookiePath} (${normalized.length} item)`);
         return normalized;
       }
     } catch {
-      // Lanjut ke path berikutnya jika file tidak ada
+      // Lanjut
     }
   }
 
-  // Cek apakah ada cookie string dalam .env (STOCKBIT_COOKIES)
   if (process.env.STOCKBIT_COOKIES) {
     try {
       const envRaw = process.env.STOCKBIT_COOKIES.trim();
@@ -268,11 +251,10 @@ export async function loadCookies() {
       }
       const normalized = normalizeCookies(parsed);
       if (normalized.length > 0) {
-        console.log(`🍪 Berhasil membaca cookies dari variabel .env (${normalized.length} item)`);
         return normalized;
       }
     } catch {
-      // Abaikan jika error
+      // Abaikan
     }
   }
 
@@ -281,13 +263,11 @@ export async function loadCookies() {
 
 /**
  * Menerapkan cookies sesi login ke Puppeteer page
- * @param {import('puppeteer').Page} page
  */
 export async function applyCookies(page) {
   const cookies = await loadCookies();
   if (cookies && cookies.length > 0) {
     await page.setCookie(...cookies);
-    console.log(`✅ ${cookies.length} session cookies berhasil dipasang ke halaman.`);
     return true;
   } else {
     console.warn('⚠️ Tidak ada cookies.json yang ditemukan. Puppeteer akan berjalan tanpa login.');
@@ -297,22 +277,12 @@ export async function applyCookies(page) {
 
 /**
  * Fungsi opsional untuk menyimpan sesi login Stockbit (mode headless: false)
- * Pengguna login manual di browser yang muncul hingga dialihkan ke /watchlist,
- * lalu cookies otomatis disimpan ke cookies.json.
- *
- * @param {string} [outputPath] - Jalur file output penyimpanan cookies
- * @param {number} [timeoutMs=180000] - Batas waktu menunggu login (default 3 menit)
- * @returns {Promise<Object>}
  */
 export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
   const targetPath = outputPath || path.resolve(__dirname, '../../cookies.json');
   console.log(`🚀 Meluncurkan browser untuk login manual ke Stockbit...`);
 
   const realChromePath = findChromeExecutable();
-  if (realChromePath) {
-    console.log(`🌐 Menggunakan binary Chrome asli sistem: ${realChromePath}`);
-  }
-
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
@@ -330,33 +300,24 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
     const pages = await browser.pages();
     const page = pages.length > 0 ? pages[0] : await browser.newPage();
 
-    // Sembunyikan tanda-tanda navigator.webdriver
     await page.evaluateOnNewDocument(() => {
-      Object.defineProperty(navigator, 'webdriver', {
-        get: () => undefined,
-      });
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
     });
 
     console.log(`🔗 Membuka halaman login: https://stockbit.com/login`);
     await page.goto('https://stockbit.com/login', { waitUntil: 'networkidle2', timeout: 60000 });
 
-    console.log('⏳ Silakan login ke akun Stockbit Anda di jendela browser...');
-    console.log('   Sistem mendeteksi login otomatis saat halaman berpindah ke /watchlist.');
-
-    // Tunggu hingga URL mengarah ke /watchlist atau elemen watchlist terdeteksi
     const startTime = Date.now();
     let loggedIn = false;
 
     while (Date.now() - startTime < timeoutMs) {
       const currentUrl = page.url();
       if (currentUrl.includes('/watchlist') || (!currentUrl.includes('/login') && !currentUrl.includes('/register'))) {
-        // Pastikan halaman selesai merender
         try {
           await page.waitForSelector('tbody.ant-table-tbody, [class*="watchlist"]', { timeout: 8000 });
           loggedIn = true;
           break;
         } catch {
-          // Jika url sudah watchlist tapi selector belum selesai muat, tunggu sejenak
           if (currentUrl.includes('/watchlist')) {
             loggedIn = true;
             break;
@@ -372,10 +333,7 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
 
     console.log('🎉 Login berhasil terdeteksi! Mengambil cookies sesi...');
     const cookies = await page.cookies();
-
-    // Simpan ke file cookies.json
     await fs.writeFile(targetPath, JSON.stringify(cookies, null, 2), 'utf-8');
-    console.log(`💾 ${cookies.length} cookie berhasil disimpan ke: ${targetPath}`);
 
     return {
       success: true,
@@ -389,10 +347,7 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
 }
 
 /**
- * Ekstraksi daftar kode emiten dari tabel Watchlist Stockbit (https://stockbit.com/watchlist)
- *
- * @param {import('puppeteer').Page} page
- * @returns {Promise<Array<string>>} Daftar kode saham (misal: ['BBCA', 'BBRI', 'AXIO'])
+ * Ekstraksi daftar kode emiten dari tabel Watchlist Stockbit
  */
 export async function getWatchlistSymbols(page) {
   console.log('📋 Mengambil daftar emiten dari https://stockbit.com/watchlist...');
@@ -402,41 +357,22 @@ export async function getWatchlistSymbols(page) {
     timeout: 30000,
   });
 
-  // Periksa apakah halaman dialihkan ke halaman login (artinya cookies belum terpasang atau expired)
   const currentUrl = page.url();
   if (currentUrl.includes('/login') || (!currentUrl.includes('/watchlist') && !currentUrl.includes('stockbit.com'))) {
     throw new Error(
-      'Halaman Watchlist memerlukan sesi akun yang sudah login (terdeteksi redirect ke: ' +
-        currentUrl +
-        '). ' +
-        'Silakan login terlebih dahulu menggunakan perintah "npm run login" di terminal backend agar cookies.json tersimpan, ' +
-        'atau kirim parameter "symbols" pada body request (contoh: { "symbols": ["BBCA", "BBRI"] }) jika ingin menentukan emiten secara manual.'
+      `Halaman Watchlist memerlukan sesi akun yang sudah login (redirect ke: ${currentUrl}). Silakan simpan cookies.json.`
     );
   }
 
-  // Tunggu hingga baris data emiten (tr.ant-table-row) benar-benar selesai dimuat
   try {
     await page.waitForSelector('tbody.ant-table-tbody tr.ant-table-row', { timeout: 25000 });
-  } catch (timeoutErr) {
-    const checkUrl = page.url();
-    if (checkUrl.includes('/login')) {
-      throw new Error(
-        'Sesi login Stockbit tidak valid atau belum dimuat. Halaman terlempar ke /login. ' +
-          'Silakan jalankan "npm run login" untuk memperbarui sesi.'
-      );
-    }
-    throw new Error(
-      'Gagal memuat baris data watchlist Stockbit (tbody.ant-table-tbody tr.ant-table-row tidak muncul dalam 25 detik). ' +
-        'Pastikan akun Stockbit memiliki daftar saham pada watchlist default.'
-    );
+  } catch {
+    throw new Error('Gagal memuat baris data watchlist Stockbit (timeout 25 detik).');
   }
 
-  // Beri jeda singkat agar seluruh baris selesai dirender sepenuhnya
   await new Promise((r) => setTimeout(r, 800));
 
-  // Ekstraksi kode emiten di dalam DOM (melalui link /symbol/[KODE] dan sel pertama tabel)
   const symbols = await page.evaluate(() => {
-    // 1. Strategi utama: Ambil langsung dari link href="/symbol/KODE" di tabel watchlist
     const links = Array.from(document.querySelectorAll('tbody.ant-table-tbody a[href*="/symbol/"]'));
     const stockCodes = links
       .map((a) => {
@@ -450,31 +386,19 @@ export async function getWatchlistSymbols(page) {
       return Array.from(new Set(stockCodes));
     }
 
-    // 2. Strategi fallback: Iterasi baris tabel ant-table-row
     const rows = Array.from(document.querySelectorAll('tbody.ant-table-tbody tr.ant-table-row'));
     const result = [];
-
     for (const row of rows) {
       if (row.classList.contains('ant-table-measure-row')) continue;
       const firstCell = row.querySelector('td.ant-table-cell-fix-left') || row.children[0];
       if (!firstCell) continue;
-
       const codeWrapper = firstCell.querySelector('div[class*="sc-c5bdc04d"]') || firstCell;
       const text = (codeWrapper.innerText || codeWrapper.textContent || '').trim();
-
       if (text) {
         const match = text.match(/^[A-Z0-9]{4,6}/);
-        if (match) {
-          result.push(match[0]);
-        } else {
-          const firstWord = text.split(/\s+/)[0]?.toUpperCase();
-          if (firstWord && /^[A-Z0-9]{4,6}$/.test(firstWord)) {
-            result.push(firstWord);
-          }
-        }
+        if (match) result.push(match[0]);
       }
     }
-
     return Array.from(new Set(result));
   });
 
@@ -482,230 +406,104 @@ export async function getWatchlistSymbols(page) {
   return symbols;
 }
 
+/* ============================================================================
+ * BAGIAN 1: MODE 1 - EKSTRAKSI KHUSUS BROKER SUMMARY (BATCH HARIAN)
+ * ============================================================================ */
+
 /**
- * Ekstraksi Orderbook dan Broker Summary untuk satu emiten pada halaman https://stockbit.com/symbol/${symbol}
- *
+ * Ekstraksi HANYA data Broker Summary pada halaman emiten (melewati parsing Orderbook)
  * @param {import('puppeteer').Page} page
  * @param {string} symbol - Kode saham (misal: 'BBCA')
- * @returns {Promise<Object>} Data terstruktur snapshot Orderbook & Broker Summary
+ * @returns {Promise<Object>}
  */
-export async function scrapeStockDetail(page, symbol) {
+export async function extractBrokerSummaryOnly(page, symbol) {
   const stockCode = symbol.toUpperCase().trim();
   const url = `https://stockbit.com/symbol/${stockCode}`;
-  console.log(`🔍 Mengunjungi halaman emiten: ${url}`);
+  console.log(`🔍 [Broksum Mode] Mengunjungi emiten: ${url}`);
 
   await page.goto(url, {
     waitUntil: 'domcontentloaded',
     timeout: 30000,
   });
 
-  // Tunggu container utama halaman selesai dimuat
+  // Tunggu container utama
   try {
     await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
   } catch {
     const currentUrl = page.url();
     if (currentUrl.includes('/login')) {
-      throw new Error(
-        `Gagal membuka emiten ${stockCode}: halaman dialihkan ke ${currentUrl}. Pastikan Anda telah login menggunakan "npm run login".`
-      );
-    }
-    // Cek apakah halaman berada dalam mode tamu (tanpa session login)
-    const isGuestView = await page.evaluate(() => {
-      return !document.querySelector('main#main-container') && !!document.querySelector('a[href*="/login"]');
-    });
-
-    if (isGuestView) {
-      throw new Error(
-        `Halaman emiten ${stockCode} terbuka dalam mode tamu (belum login). ` +
-        `Fitur antrean Orderbook dan data Broker Summary hanya tersedia untuk akun yang sudah login. ` +
-        `Silakan simpan sesi login terlebih dahulu dengan perintah "npm run login".`
-      );
+      throw new Error(`Sesi login expired saat membuka emiten ${stockCode}.`);
     }
   }
 
-  // Scroll secukupnya ke bawah untuk memicu lazy-render komponen di panel kanan (Broker Summary)
+  // Scroll secukupnya ke bawah untuk memicu lazy-render kartu Broker Summary
   await page.evaluate(() => {
-    window.scrollBy(0, 700);
+    window.scrollBy(0, 800);
     const mainContainer = document.querySelector('main#main-container');
-    if (mainContainer) {
-      mainContainer.scrollTop = 700;
-    }
+    if (mainContainer) mainContainer.scrollTop = 800;
   });
 
-  // Beri jeda singkat agar reaktif state/fetch data Stockbit selesai
   await new Promise((r) => setTimeout(r, 1200));
 
-  // Ekstraksi data Orderbook dan Broker Summary di dalam konteks DOM
-  const extractedData = await page.evaluate(() => {
-    /* =====================================================================
-     * 1. IDENTIFIKASI CONTAINER UTAMA
-     * ===================================================================== */
+  // Ekstraksi data Broker Summary dalam DOM
+  const rawData = await page.evaluate(() => {
     const main = document.querySelector('main#main-container') || document.body;
-
-    /* =====================================================================
-     * 2. EKSTRAKSI ORDERBOOK
-     * Strategi jangkar stabil:
-     * - Cari elemen di dalam main yang memuat teks header kolom:
-     *   "Freq", "Lot", "Bid", "Offer"
-     * - Ambil harga terakhir dan persentase di header card Orderbook
-     * - Ekstrak setiap baris antrean di bawah header Freq | Lot | Bid | Offer | Lot | Freq
-     * ===================================================================== */
     let lastPriceRaw = '0';
     let priceChangePctRaw = '0';
-    const rawOrderbookRows = [];
-
-    // Cari seluruh kandidat elemen tabel atau container di dalam main
-    const allContainers = Array.from(main.querySelectorAll('div, section, table'));
-
-    // Temukan container Orderbook berdasarkan keberadaan teks header kolom
-    const orderbookHeaderContainer = allContainers.find((el) => {
-      const text = el.innerText || '';
-      return (
-        text.includes('Freq') &&
-        text.includes('Lot') &&
-        text.includes('Bid') &&
-        text.includes('Offer') &&
-        // Pastikan ini elemen container yang cukup spesifik (panjang teks tidak terlalu raksasa)
-        text.length < 5000
-      );
-    });
-
-    if (orderbookHeaderContainer) {
-      // A. Ambil Header Harga Terakhir dan Perubahan (%)
-      // Header harga berada di card induk Orderbook
-      let parentCard = orderbookHeaderContainer;
-      for (let i = 0; i < 4 && parentCard.parentElement; i++) {
-        parentCard = parentCard.parentElement;
-        const cardText = parentCard.innerText || '';
-        // Cek apakah ada pola harga dan persentase perubahan: misal "140 +1 (+0.72%)" atau "9,850 -50 (-0.51%)"
-        const priceRegex = /([0-9.,]+)\s+([+-]?[0-9.,]+)\s+\(([+-]?[0-9.,]+%)\)/;
-        const match = cardText.match(priceRegex);
-        if (match) {
-          lastPriceRaw = match[1];
-          priceChangePctRaw = match[3];
-          break;
-        }
-      }
-
-      // Jika pola lengkap belum dapat, cari elemen harga spesifik di card tersebut
-      if (lastPriceRaw === '0') {
-        const priceEls = Array.from(parentCard.querySelectorAll('h1, h2, h3, span, div'));
-        for (const el of priceEls) {
-          const t = (el.innerText || '').trim();
-          // Cek teks persentase misal "(+0.72%)" atau "-1.25%"
-          if (t.includes('%') && priceChangePctRaw === '0') {
-            priceChangePctRaw = t;
-          }
-          // Cek teks harga murni angka
-          if (/^[1-9][0-9.,]{1,8}$/.test(t) && lastPriceRaw === '0') {
-            lastPriceRaw = t;
-          }
-        }
-      }
-
-      // B. Ekstrak Baris Antrean Orderbook
-      // Cari baris-baris di dalam card Orderbook (parentCard) yang memuat 6 kolom antrean
-      const allDivsInCard = Array.from(parentCard.querySelectorAll('tr, div'));
-      for (const d of allDivsInCard) {
-        // Cek jika elemen memiliki tepat 6 anak kolom langsung (Freq | Lot | Bid | Offer | Lot | Freq)
-        if (d.children.length === 6) {
-          const cells = Array.from(d.children);
-          const hasBid = (cells[0].className + cells[1].className + cells[2].className).toLowerCase().includes('bid');
-          const hasOffer = (cells[3].className + cells[4].className + cells[5].className).toLowerCase().includes('offer');
-          const rowText = (d.innerText || '').toLowerCase();
-
-          // Pastikan bukan header dan bukan ringkasan total
-          if (hasBid && hasOffer && !rowText.includes('freq') && !rowText.includes('total')) {
-            const texts = cells.map((c) => (c.innerText || '').trim());
-            rawOrderbookRows.push({
-              bidFreq: texts[0] || '0',
-              bidLot: texts[1] || '0',
-              bidPrice: texts[2] || '0',
-              offerPrice: texts[3] || '0',
-              offerLot: texts[4] || '0',
-              offerFreq: texts[5] || '0',
-            });
-          }
-        }
-      }
-    }
-
-    /* =====================================================================
-     * 3. EKSTRAKSI BROKER SUMMARY
-     * Strategi jangkar stabil:
-     * - Cari container bertuliskan judul "Broker Summary" dan
-     *   header kolom: "BY", "B.val", "B.lot", "B.avg", "SL", "S.val", "S.lot", "S.avg"
-     * - Ambil tanggal transaksi dari date picker card Broker Summary (contoh: "16 Nov 26")
-     * - Ekstrak setiap baris data broker untuk sisi Buyer (BY) dan Seller (SL)
-     * ===================================================================== */
     let rawTradeDate = '';
     const rawBuyerItems = [];
     const rawSellerItems = [];
 
-    // Temukan container Broker Summary
+    // 1. Ambil Header Harga dan Persentase Perubahan di atas halaman
+    const priceRegex = /([0-9.,]+)\s+([+-]?[0-9.,]+)\s+\(([+-]?[0-9.,]+%)\)/;
+    const bodyText = main.innerText || '';
+    const matchHeader = bodyText.match(priceRegex);
+    if (matchHeader) {
+      lastPriceRaw = matchHeader[1];
+      priceChangePctRaw = matchHeader[3];
+    }
+
+    // 2. Temukan container Broker Summary
+    const allContainers = Array.from(main.querySelectorAll('div, section, table'));
     const broksumContainer = allContainers.find((el) => {
       const text = el.innerText || '';
       return (
         text.includes('Broker Summary') &&
         (text.includes('BY') || text.includes('B.val')) &&
         (text.includes('SL') || text.includes('S.val')) &&
-        text.length < 8000
+        text.length < 9000
       );
     });
 
     if (broksumContainer) {
-      // A. Ambil Tanggal Transaksi dari Date Picker
-      // Biasanya tertera tanggal seperti "16 Nov 26" atau "16 Nov 2026"
-      const broksumText = broksumContainer.innerText || '';
-      const dateMatch = broksumText.match(/(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})/);
-      if (dateMatch) {
-        rawTradeDate = dateMatch[1];
-      }
+      // Tanggal Transaksi
+      const bText = broksumContainer.innerText || '';
+      const dateMatch = bText.match(/(\d{1,2}\s+[A-Za-z]{3,9}\s+\d{2,4})/);
+      if (dateMatch) rawTradeDate = dateMatch[1];
 
-      // B. Ekstraksi Data Baris Buyer & Seller
-      // Struktur Stockbit dapat berupa 1 baris utuh dengan 8 kolom:
-      // [0: BY, 1: B.val, 2: B.lot, 3: B.avg, 4: SL, 5: S.val, 6: S.lot, 7: S.avg]
-      // atau dua tabel berdampingan (Buyer Table dan Seller Table).
+      // Kategori Broker helper
+      const detectCategory = (el) => {
+        if (!el) return 'UNKNOWN';
+        const className = (el.className || '').toLowerCase();
+        const color = (el.style?.color || '').toLowerCase();
+        if (className.includes('foreign') || color.includes('red') || color.includes('orange')) return 'FOREIGN';
+        if (className.includes('local') || className.includes('domestic')) return 'LOCAL';
+        if (className.includes('gov') || className.includes('bumn')) return 'GOVERNMENT';
+        return 'UNKNOWN';
+      };
 
-      // Cek apakah ada baris dengan 8 kolom
-      const candidateBsRows = Array.from(
-        broksumContainer.querySelectorAll('tr, div[class*="row"]')
-      );
-
-      for (const row of candidateBsRows) {
+      // Cek baris 8 kolom
+      const candidateRows = Array.from(broksumContainer.querySelectorAll('tr, div[class*="row"]'));
+      for (const row of candidateRows) {
         const cells = Array.from(row.querySelectorAll('td, div[class*="col"], div'))
-          .map((c) => ({
-            text: (c.innerText || '').trim(),
-            element: c,
-          }))
+          .map((c) => ({ text: (c.innerText || '').trim(), element: c }))
           .filter((c) => c.text.length > 0 && c.text.length < 30);
 
         const texts = cells.map((c) => c.text);
-
-        // Jika satu baris memuat 8 sel (4 Buyer + 4 Seller)
         if (texts.length >= 8) {
-          // Abaikan baris header
           if (texts[0].toUpperCase() === 'BY' || texts[4]?.toUpperCase() === 'SL') continue;
           if (texts.join(' ').toLowerCase().includes('total')) continue;
 
-          // Deteksi kategori broker (FOREIGN vs LOCAL vs GOVERNMENT vs UNKNOWN)
-          const detectCategory = (el) => {
-            if (!el) return 'UNKNOWN';
-            const className = (el.className || '').toLowerCase();
-            const color = (el.style?.color || '').toLowerCase();
-            if (className.includes('foreign') || color.includes('red') || color.includes('orange')) {
-              return 'FOREIGN';
-            }
-            if (className.includes('local') || className.includes('domestic')) {
-              return 'LOCAL';
-            }
-            if (className.includes('gov') || className.includes('bumn')) {
-              return 'GOVERNMENT';
-            }
-            return 'UNKNOWN';
-          };
-
-          // Buyer Side
           const buyerCode = texts[0].replace(/[^A-Za-z0-9]/g, '').toUpperCase();
           if (buyerCode.length >= 2 && buyerCode.length <= 5) {
             rawBuyerItems.push({
@@ -717,7 +515,6 @@ export async function scrapeStockDetail(page, symbol) {
             });
           }
 
-          // Seller Side
           const sellerCode = texts[4].replace(/[^A-Za-z0-9]/g, '').toUpperCase();
           if (sellerCode.length >= 2 && sellerCode.length <= 5) {
             rawSellerItems.push({
@@ -731,15 +528,12 @@ export async function scrapeStockDetail(page, symbol) {
         }
       }
 
-      // Jika format baris 8 kolom belum terisi, coba parsing via dua sub-panel terpisah
+      // Fallback format 2 sub-panel terpisah
       if (rawBuyerItems.length === 0 && rawSellerItems.length === 0) {
-        // Cari container yang memuat header BY
         const buyerSub = Array.from(broksumContainer.querySelectorAll('div, table')).find((el) => {
           const t = el.innerText || '';
           return t.includes('BY') && t.includes('B.val') && !t.includes('SL');
         });
-
-        // Cari container yang memuat header SL
         const sellerSub = Array.from(broksumContainer.querySelectorAll('div, table')).find((el) => {
           const t = el.innerText || '';
           return t.includes('SL') && t.includes('S.val') && !t.includes('BY');
@@ -788,34 +582,16 @@ export async function scrapeStockDetail(page, symbol) {
     return {
       lastPriceRaw,
       priceChangePctRaw,
-      rawOrderbookRows,
       rawTradeDate,
       rawBuyerItems,
       rawSellerItems,
     };
   });
 
-  /* =====================================================================
-   * 4. NORMALISASI & FORMATTING DI LUAR EVALUATE
-   * ===================================================================== */
-
-  // A. Format Orderbook
-  const formattedOrderbook = extractedData.rawOrderbookRows.map((row, index) => ({
-    level_order: index + 1,
-    bidFreq: Math.round(parseAbbreviatedNumber(row.bidFreq)),
-    bidLot: Math.round(parseAbbreviatedNumber(row.bidLot)),
-    bidPrice: Math.round(parseAbbreviatedNumber(row.bidPrice)),
-    offerPrice: Math.round(parseAbbreviatedNumber(row.offerPrice)),
-    offerLot: Math.round(parseAbbreviatedNumber(row.offerLot)),
-    offerFreq: Math.round(parseAbbreviatedNumber(row.offerFreq)),
-  }));
-
-  // B. Format & Gabungkan Broker Summary per broker_code
-  // Gunakan Map agar broker yang melakukan transaksi beli dan jual digabung menjadi 1 baris
+  // Normalisasi & Gabungkan per broker_code
   const brokerMap = new Map();
 
-  // Proses Buyer Side
-  for (const item of extractedData.rawBuyerItems) {
+  for (const item of rawData.rawBuyerItems) {
     const code = item.brokerCode;
     const existing = brokerMap.get(code) || {
       brokerCode: code,
@@ -827,18 +603,14 @@ export async function scrapeStockDetail(page, symbol) {
       sellValue: 0,
       avgSellPrice: 0,
     };
-
     existing.buyLot = Math.round(parseAbbreviatedNumber(item.buyLot));
     existing.buyValue = parseAbbreviatedNumber(item.buyValue);
     existing.avgBuyPrice = parseAbbreviatedNumber(item.avgBuyPrice);
-    if (item.category && item.category !== 'UNKNOWN') {
-      existing.category = item.category;
-    }
+    if (item.category && item.category !== 'UNKNOWN') existing.category = item.category;
     brokerMap.set(code, existing);
   }
 
-  // Proses Seller Side
-  for (const item of extractedData.rawSellerItems) {
+  for (const item of rawData.rawSellerItems) {
     const code = item.brokerCode;
     const existing = brokerMap.get(code) || {
       brokerCode: code,
@@ -850,7 +622,6 @@ export async function scrapeStockDetail(page, symbol) {
       sellValue: 0,
       avgSellPrice: 0,
     };
-
     existing.sellLot = Math.round(parseAbbreviatedNumber(item.sellLot));
     existing.sellValue = parseAbbreviatedNumber(item.sellValue);
     existing.avgSellPrice = parseAbbreviatedNumber(item.avgSellPrice);
@@ -861,13 +632,12 @@ export async function scrapeStockDetail(page, symbol) {
   }
 
   const formattedBroksum = Array.from(brokerMap.values());
-  const effectiveTradeDate = parseTradeDate(extractedData.rawTradeDate);
+  const effectiveTradeDate = parseTradeDate(rawData.rawTradeDate);
 
-  // Normalisasi harga terakhir dan persentase perubahan
-  const lastPrice = Math.round(parseAbbreviatedNumber(extractedData.lastPriceRaw));
+  const lastPrice = Math.round(parseAbbreviatedNumber(rawData.lastPriceRaw));
   let priceChangePct = 0;
-  if (extractedData.priceChangePctRaw) {
-    const cleanedPct = extractedData.priceChangePctRaw.replace(/[^0-9.-]/g, '');
+  if (rawData.priceChangePctRaw) {
+    const cleanedPct = rawData.priceChangePctRaw.replace(/[^0-9.-]/g, '');
     priceChangePct = parseFloat(cleanedPct) || 0;
   }
 
@@ -877,24 +647,680 @@ export async function scrapeStockDetail(page, symbol) {
     priceChangePct: isNaN(priceChangePct) ? 0 : priceChangePct,
     tradeDate: effectiveTradeDate,
     capturedAt: new Date().toISOString(),
-    orderbookList: formattedOrderbook,
+    captureType: 'BROKSUM',
+    orderbookList: [], // Melewati Orderbook sesuai spesifikasi Mode 1
     broksumList: formattedBroksum,
   };
 }
 
 /**
- * Alur kerja lengkap (Workflow) pengambilan data:
- * 1. Menyalakan Chromium & memuat sesi cookies
- * 2. Mengambil daftar emiten dari Watchlist (atau daftar custom jika diberikan)
- * 3. Mengunjungi tiap emiten secara berurutan dengan jeda acak 1.5 - 3 detik
- * 4. Menyimpan data snapshot tiap emiten ke MySQL secara transaksional
- *
- * @param {Object} options
- * @param {Array<string>} [options.symbols] - Opsi emiten spesifik jika tidak ingin scrape seluruh watchlist
- * @param {number} [options.limit] - Batasi jumlah emiten untuk keperluan uji coba
- * @param {boolean} [options.headless=true] - Mode headless Chromium
- * @param {Function} [options.onStockCaptured] - Callback event tiap kali 1 emiten selesai disimpan
- * @returns {Promise<Object>} Ringkasan hasil seluruh capture
+ * Mode 1: Menjalankan capture Broker Summary harian untuk seluruh atau sebagian emiten
+ * @param {Array<string>} [symbols=[]] - Daftar kode emiten
+ * @param {Object} [options={}]
+ * @param {boolean} [options.headless=true]
+ * @param {number} [options.limit=null]
+ * @returns {Promise<Object>}
+ */
+export async function captureBrokerSummaryOnly(symbols = [], { headless = true, limit = null } = {}) {
+  let browser;
+  const startTime = Date.now();
+  const successList = [];
+  const failedList = [];
+
+  try {
+    console.log(`🚀 [Mode 1] Memulai capture Broker Summary harian (headless: ${headless})...`);
+    browser = await puppeteer.launch({
+      headless: headless ? 'new' : false,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--window-size=1920,1080'],
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1920, height: 1080 });
+    await page.setUserAgent(
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+    );
+
+    const hasCookies = await applyCookies(page);
+
+    let targetSymbols = Array.isArray(symbols) && symbols.length > 0 ? symbols : null;
+    if (!targetSymbols) {
+      if (!hasCookies) {
+        throw new Error('Sesi cookies.json diperlukan untuk membaca watchlist Stockbit.');
+      }
+      targetSymbols = await getWatchlistSymbols(page);
+    }
+
+    if (limit && Number(limit) > 0) {
+      targetSymbols = targetSymbols.slice(0, Number(limit));
+    }
+
+    console.log(`🎯 [Mode 1] Total emiten yang akan diproses: ${targetSymbols.length}`);
+
+    for (let i = 0; i < targetSymbols.length; i++) {
+      const symbol = targetSymbols[i].toUpperCase().trim();
+      console.log(`\n[${i + 1}/${targetSymbols.length}] Mengambil Broker Summary: ${symbol}`);
+
+      try {
+        const broksumData = await extractBrokerSummaryOnly(page, symbol);
+
+        // Simpan ke database dengan capture_type = 'BROKSUM'
+        const saveResult = await saveStockCapture({
+          stockCode: symbol,
+          lastPrice: broksumData.lastPrice,
+          priceChangePct: broksumData.priceChangePct,
+          tradeDate: broksumData.tradeDate,
+          captureType: 'BROKSUM',
+          orderbookList: [],
+          broksumList: broksumData.broksumList,
+          isDailyFinal: 1,
+        });
+
+        successList.push({
+          symbol,
+          lastPrice: broksumData.lastPrice,
+          tradeDate: broksumData.tradeDate,
+          broksumCount: broksumData.broksumList.length,
+          sessionId: saveResult.sessionId,
+        });
+
+        console.log(`✅ [Broksum Sukses] ${symbol}: ${broksumData.broksumList.length} broker tercatat`);
+      } catch (err) {
+        console.error(`❌ [Broksum Gagal] ${symbol}:`, err.message);
+        failedList.push({ symbol, error: err.message });
+      }
+
+      if (i < targetSymbols.length - 1) {
+        const delayMs = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
+        await new Promise((r) => setTimeout(r, delayMs));
+      }
+    }
+
+    const durationSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
+    console.log(`\n🏁 [Mode 1 Selesai] Total: ${targetSymbols.length}, Sukses: ${successList.length}, Gagal: ${failedList.length} (${durationSeconds}s)`);
+
+    return {
+      success: true,
+      captureType: 'BROKSUM',
+      durationSeconds: Number(durationSeconds),
+      totalProcessed: targetSymbols.length,
+      successCount: successList.length,
+      failedCount: failedList.length,
+      successList,
+      failedList,
+    };
+  } finally {
+    if (browser) {
+      await browser.close();
+      console.log('🔒 Browser instance Chromium [Mode 1] berhasil ditutup.');
+    }
+  }
+}
+
+/* ============================================================================
+ * BAGIAN 2: MODE 2 - REAL-TIME ORDERBOOK STREAMING (CDP WEBSOCKET + THROTTLING 30 DETIK)
+ * ============================================================================ */
+
+/**
+ * State global in-memory untuk streaming real-time Orderbook
+ */
+const streamingState = {
+  isRunning: false,
+  browser: null,
+  pages: new Map(), // symbol -> page
+  cdpClients: new Map(), // symbol -> client
+  latestOrderbookMap: new Map(), // symbol -> { symbol, lastPrice, priceChangePct, orderbookList, isDirty, lastUpdated }
+  intervalTimer: null,
+  marketCheckTimer: null,
+  monitoredSymbols: [],
+  intervalMs: 30000,
+  startTime: null,
+  lastFlushTime: null,
+  totalSessionsSaved: 0,
+};
+
+/**
+ * Ekstraksi baris antrean Orderbook dari DOM halaman aktif (mendukung 10 level)
+ */
+async function extractOrderbookFromPage(page, symbol) {
+  try {
+    return await page.evaluate(() => {
+      const main = document.querySelector('main#main-container') || document.body;
+      let lastPriceRaw = '0';
+      let priceChangePctRaw = '0';
+      const rawRows = [];
+
+      // 1. Ekstrak Header Harga
+      const priceRegex = /([0-9.,]+)\s+([+-]?[0-9.,]+)\s+\(([+-]?[0-9.,]+%)\)/;
+      const match = (main.innerText || '').match(priceRegex);
+      if (match) {
+        lastPriceRaw = match[1];
+        priceChangePctRaw = match[3];
+      }
+
+      // 2. Cari kontainer Orderbook
+      const allDivs = Array.from(main.querySelectorAll('div, section, table'));
+      const obContainer = allDivs.find((el) => {
+        const text = el.innerText || '';
+        return (
+          text.includes('Freq') &&
+          text.includes('Lot') &&
+          text.includes('Bid') &&
+          text.includes('Offer') &&
+          text.length < 5000
+        );
+      });
+
+      if (obContainer) {
+        let parentCard = obContainer;
+        for (let i = 0; i < 4 && parentCard.parentElement; i++) {
+          parentCard = parentCard.parentElement;
+        }
+
+        // Cari semua baris yang memuat 6 kolom antrean (Freq, Lot, Bid, Offer, Lot, Freq)
+        const candidates = Array.from(parentCard.querySelectorAll('tr, div'));
+        for (const d of candidates) {
+          if (d.children.length === 6) {
+            const cells = Array.from(d.children);
+            const classes = cells.map((c) => (c.className || '').toLowerCase()).join(' ');
+            const hasBid = classes.includes('bid');
+            const hasOffer = classes.includes('offer');
+            const rowText = (d.innerText || '').toLowerCase();
+
+            if (hasBid && hasOffer && !rowText.includes('freq') && !rowText.includes('total')) {
+              const texts = cells.map((c) => (c.innerText || '').trim());
+              rawRows.push({
+                bidFreq: texts[0] || '0',
+                bidLot: texts[1] || '0',
+                bidPrice: texts[2] || '0',
+                offerPrice: texts[3] || '0',
+                offerLot: texts[4] || '0',
+                offerFreq: texts[5] || '0',
+              });
+            }
+          }
+        }
+      }
+
+      return {
+        lastPriceRaw,
+        priceChangePctRaw,
+        rawRows,
+      };
+    });
+  } catch (err) {
+    return null;
+  }
+}
+
+/**
+ * Parsing adaptif frame WebSocket yang diterima dari Stockbit
+ */
+function handleWebSocketFrame(symbol, payloadData) {
+  if (!payloadData || typeof payloadData !== 'string') return;
+
+  const isDebug = process.env.DEBUG_WS === 'true';
+  if (isDebug) {
+    const preview = payloadData.length > 150 ? payloadData.slice(0, 150) + '...' : payloadData;
+    console.log(`📡 [CDP WS ${symbol}] Frame: ${preview}`);
+  }
+
+  // Stockbit sering menggunakan JSON string atau Socket.io packet (misal: '42["orderbook", {...}]')
+  let parsedPayload = null;
+  try {
+    if (payloadData.startsWith('42[')) {
+      const jsonStr = payloadData.slice(2);
+      const arr = JSON.parse(jsonStr);
+      if (Array.isArray(arr) && arr.length >= 2) {
+        parsedPayload = arr[1];
+      }
+    } else if (payloadData.startsWith('{') || payloadData.startsWith('[')) {
+      parsedPayload = JSON.parse(payloadData);
+    }
+  } catch {
+    // Format frame non-JSON diabaikan secara elegan (fallback DOM aktif)
+    return;
+  }
+
+  if (!parsedPayload) return;
+
+  // Analisis apakah payload memuat data Orderbook / Price Tick
+  const obData = parsedPayload.data || parsedPayload.orderbook || parsedPayload;
+  const existing = streamingState.latestOrderbookMap.get(symbol);
+  if (!existing) return;
+
+  let hasUpdate = false;
+
+  if (obData.last_price || obData.last || obData.close) {
+    const p = Number(obData.last_price || obData.last || obData.close);
+    if (!isNaN(p) && p > 0) {
+      existing.lastPrice = Math.round(p);
+      hasUpdate = true;
+    }
+  }
+
+  if (obData.change_pct || obData.price_change_pct) {
+    const pct = parseFloat(obData.change_pct || obData.price_change_pct);
+    if (!isNaN(pct)) {
+      existing.priceChangePct = pct;
+      hasUpdate = true;
+    }
+  }
+
+  // Jika payload menyediakan array bid/offer langsung
+  if (Array.isArray(obData.bids) || Array.isArray(obData.offers)) {
+    const bids = obData.bids || [];
+    const offers = obData.offers || [];
+    const maxLen = Math.max(bids.length, offers.length);
+    const updatedList = [];
+
+    for (let i = 0; i < maxLen; i++) {
+      const b = bids[i] || {};
+      const o = offers[i] || {};
+      updatedList.push({
+        level_order: i + 1,
+        bidFreq: Number(b.freq || b.frequency || 0),
+        bidLot: Number(b.lot || b.volume || 0),
+        bidPrice: Number(b.price || 0) || null,
+        offerPrice: Number(o.price || 0) || null,
+        offerLot: Number(o.lot || o.volume || 0),
+        offerFreq: Number(o.freq || o.frequency || 0),
+      });
+    }
+
+    if (updatedList.length > 0) {
+      existing.orderbookList = updatedList;
+      hasUpdate = true;
+    }
+  }
+
+  if (hasUpdate) {
+    existing.isDirty = true;
+    existing.lastUpdated = new Date().toISOString();
+  }
+}
+
+/**
+ * Sinkronisasi dan flushing in-memory orderbook ke database MySQL setiap interval 30 detik
+ */
+async function flushDirtyOrderbooksToDb() {
+  if (!streamingState.isRunning) return;
+
+  const entriesToSave = [];
+
+  for (const [symbol, state] of streamingState.latestOrderbookMap.entries()) {
+    // Sinkronisasi data terkini dari DOM halaman aktif agar seluruh level 1-10 selalu presisi
+    const page = streamingState.pages.get(symbol);
+    if (page && !page.isClosed()) {
+      try {
+        const domResult = await extractOrderbookFromPage(page, symbol);
+        if (domResult && domResult.rawRows && domResult.rawRows.length > 0) {
+          const formattedList = domResult.rawRows.map((r, idx) => ({
+            level_order: idx + 1,
+            bidFreq: Math.round(parseAbbreviatedNumber(r.bidFreq)),
+            bidLot: Math.round(parseAbbreviatedNumber(r.bidLot)),
+            bidPrice: Math.round(parseAbbreviatedNumber(r.bidPrice)),
+            offerPrice: Math.round(parseAbbreviatedNumber(r.offerPrice)),
+            offerLot: Math.round(parseAbbreviatedNumber(r.offerLot)),
+            offerFreq: Math.round(parseAbbreviatedNumber(r.offerFreq)),
+          }));
+
+          const domPrice = Math.round(parseAbbreviatedNumber(domResult.lastPriceRaw));
+          if (domPrice > 0) state.lastPrice = domPrice;
+
+          if (domResult.priceChangePctRaw) {
+            const pct = parseFloat(domResult.priceChangePctRaw.replace(/[^0-9.-]/g, ''));
+            if (!isNaN(pct)) state.priceChangePct = pct;
+          }
+
+          state.orderbookList = formattedList;
+          state.isDirty = true;
+          state.lastUpdated = new Date().toISOString();
+        }
+      } catch (pageErr) {
+        // Abaikan error evaluasi individual
+      }
+    }
+
+    if (state.isDirty && state.orderbookList && state.orderbookList.length > 0) {
+      entriesToSave.push(state);
+    }
+  }
+
+  if (entriesToSave.length === 0) {
+    return;
+  }
+
+  for (const entry of entriesToSave) {
+    try {
+      const marketSession = getMarketSession();
+      const saveResult = await saveStockCapture({
+        stockCode: entry.symbol,
+        lastPrice: entry.lastPrice,
+        priceChangePct: entry.priceChangePct,
+        captureType: 'ORDERBOOK',
+        marketSession,
+        orderbookList: entry.orderbookList,
+        broksumList: [],
+        capturedAt: new Date(),
+      });
+
+      entry.isDirty = false;
+      streamingState.totalSessionsSaved++;
+      streamingState.lastFlushTime = new Date().toISOString();
+
+      console.log(
+        `💾 [Stream 30s] ${entry.symbol} Orderbook disimpan (Session #${saveResult.sessionId}, Sesi: ${marketSession}, Harga: ${entry.lastPrice}, OB: ${entry.orderbookList.length} baris)`
+      );
+    } catch (err) {
+      console.error(`❌ [Stream Flush Error] Gagal menyimpan Orderbook ${entry.symbol}:`, err.message);
+    }
+  }
+}
+
+/**
+ * Pengecekan otomatis jam tutup bursa BEI (WITA)
+ */
+function checkMarketClosingTime() {
+  const now = new Date();
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Makassar',
+    hour12: false,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+  });
+  const parts = formatter.formatToParts(now);
+  const getPart = (type) => parts.find((p) => p.type === type)?.value;
+
+  const weekday = getPart('weekday');
+  const hour = parseInt(getPart('hour') || '0', 10);
+  const minute = parseInt(getPart('minute') || '0', 10);
+  const timeInMinutes = hour * 60 + minute;
+
+  const isWeekend = weekday === 'Sat' || weekday === 'Sun';
+  const isPastClosing = timeInMinutes >= 17 * 60 + 16; // 17:16 WITA
+
+  if (isWeekend || isPastClosing) {
+    console.log(
+      `⏰ [Stream] Batas waktu perdagangan bursa berakhir (${isWeekend ? 'Akhir Pekan' : 'Pukul 17:16 WITA'}). Menghentikan streaming secara otomatis...`
+    );
+    stopRealtimeOrderbookStream('MARKET_CLOSED');
+  }
+}
+
+/**
+ * Mode 2: Memulai streaming real-time Orderbook via Chrome DevTools Protocol (CDP) WebSocket
+ * @param {Array<string>} [symbols=[]] - Daftar kode emiten yang akan dipantau
+ * @param {Object} [options={}]
+ * @param {number} [options.intervalMs=30000] - Interval throttling penyimpanan (default 30 detik)
+ * @param {boolean} [options.headless=true]
+ * @returns {Promise<Object>}
+ */
+export async function startRealtimeOrderbookStream(symbols = [], { intervalMs = 30000, headless = true } = {}) {
+  if (streamingState.isRunning) {
+    return {
+      status: 'already_running',
+      message: 'Streaming real-time Orderbook sudah berjalan aktif',
+      monitoredSymbols: streamingState.monitoredSymbols,
+      totalSessionsSaved: streamingState.totalSessionsSaved,
+      lastFlushTime: streamingState.lastFlushTime,
+    };
+  }
+
+  const maxSymbols = Number(process.env.MAX_STREAM_SYMBOLS) || 5;
+  const configuredIntervalMs = Number(process.env.STREAM_INTERVAL_MS) || intervalMs || 30000;
+
+  console.log(`\n=============================================================`);
+  console.log(`🚀 [Mode 2] Memulai Real-Time Orderbook Stream via CDP WebSocket`);
+  console.log(`   Sampling Interval: ${configuredIntervalMs / 1000} detik | Max Emiten: ${maxSymbols}`);
+  console.log(`=============================================================`);
+
+  // Luncurkan browser Chromium
+  const realChromePath = findChromeExecutable();
+  const browser = await puppeteer.launch({
+    headless: headless ? 'new' : false,
+    executablePath: realChromePath || undefined,
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-accelerated-2d-canvas',
+      '--window-size=1600,900',
+    ],
+  });
+
+  streamingState.browser = browser;
+  streamingState.isRunning = true;
+  streamingState.intervalMs = configuredIntervalMs;
+  streamingState.startTime = new Date().toISOString();
+  streamingState.totalSessionsSaved = 0;
+  streamingState.pages.clear();
+  streamingState.cdpClients.clear();
+  streamingState.latestOrderbookMap.clear();
+
+  try {
+    // 1. Tentukan daftar target emiten
+    let targetSymbols = Array.isArray(symbols) && symbols.length > 0 ? symbols : null;
+    if (!targetSymbols) {
+      const initPage = await browser.newPage();
+      await initPage.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      );
+      await applyCookies(initPage);
+      targetSymbols = await getWatchlistSymbols(initPage);
+      await initPage.close();
+    }
+
+    targetSymbols = targetSymbols.map((s) => s.toUpperCase().trim()).slice(0, maxSymbols);
+    streamingState.monitoredSymbols = targetSymbols;
+
+    console.log(`🎯 Emiten yang dipantau real-time: ${targetSymbols.join(', ')}`);
+
+    // 2. Buka setiap emiten dalam tab terpisah dengan CDP Network WebSocket Listener
+    for (const symbol of targetSymbols) {
+      const page = await browser.newPage();
+      await page.setViewport({ width: 1440, height: 900 });
+      await page.setUserAgent(
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
+      );
+
+      // Blokir aset berat untuk menghemat bandwidth & memori RAM
+      await page.setRequestInterception(true);
+      page.on('request', (req) => {
+        const resourceType = req.resourceType();
+        if (['image', 'font', 'media'].includes(resourceType)) {
+          req.abort();
+        } else {
+          req.continue();
+        }
+      });
+
+      await applyCookies(page);
+
+      // Aktifkan Chrome DevTools Protocol Session
+      const client = await page.createCDPSession();
+      await client.send('Network.enable');
+
+      // Dengarkan streaming WebSocket frames
+      client.on('Network.webSocketFrameReceived', (params) => {
+        const payloadData = params.response?.payloadData;
+        handleWebSocketFrame(symbol, payloadData);
+      });
+
+      streamingState.pages.set(symbol, page);
+      streamingState.cdpClients.set(symbol, client);
+
+      // Inisialisasi state in-memory
+      streamingState.latestOrderbookMap.set(symbol, {
+        symbol,
+        lastPrice: null,
+        priceChangePct: null,
+        orderbookList: [],
+        isDirty: false,
+        lastUpdated: null,
+      });
+
+      // Buka halaman emiten
+      const url = `https://stockbit.com/symbol/${symbol}`;
+      console.log(`🌐 [Stream Tab] Membuka ${symbol}: ${url}`);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+
+      // Beri jeda antar tab agar CPU tidak melonjak
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+
+    // 3. Jalankan timer throttling 30 detik
+    streamingState.intervalTimer = setInterval(() => {
+      flushDirtyOrderbooksToDb().catch((e) => console.error('Error saat flush 30s:', e.message));
+    }, streamingState.intervalMs);
+
+    // 4. Jalankan timer pengecekan jam tutup bursa setiap 1 menit
+    streamingState.marketCheckTimer = setInterval(() => {
+      checkMarketClosingTime();
+    }, 60000);
+
+    // Lakukan evaluasi pertama setelah 5 detik
+    setTimeout(() => {
+      flushDirtyOrderbooksToDb().catch((e) => console.error('Error inisiasi awal flush:', e.message));
+    }, 5000);
+
+    return {
+      status: 'started',
+      message: 'Streaming real-time Orderbook berhasil dimulai',
+      monitoredSymbols: targetSymbols,
+      intervalSeconds: streamingState.intervalMs / 1000,
+      startTime: streamingState.startTime,
+    };
+  } catch (err) {
+    console.error('❌ Gagal memulai Real-Time Orderbook Stream:', err.message);
+    await stopRealtimeOrderbookStream('START_ERROR');
+    throw err;
+  }
+}
+
+/**
+ * Menghentikan layanan streaming real-time Orderbook secara aman (Graceful Shutdown)
+ * @param {string} [reason='MANUAL']
+ */
+export async function stopRealtimeOrderbookStream(reason = 'MANUAL') {
+  if (!streamingState.isRunning) {
+    return {
+      status: 'not_running',
+      message: 'Streaming tidak sedang berjalan',
+    };
+  }
+
+  console.log(`🛑 Menghentikan Real-Time Orderbook Stream (Alasan: ${reason})...`);
+
+  // Bersihkan interval timer
+  if (streamingState.intervalTimer) {
+    clearInterval(streamingState.intervalTimer);
+    streamingState.intervalTimer = null;
+  }
+  if (streamingState.marketCheckTimer) {
+    clearInterval(streamingState.marketCheckTimer);
+    streamingState.marketCheckTimer = null;
+  }
+
+  // Flush data tersisa ke database
+  try {
+    console.log('💾 Menyimpan sisa buffer terakhir ke database...');
+    await flushDirtyOrderbooksToDb();
+  } catch (err) {
+    console.error('Gagal menyimpan sisa buffer:', err.message);
+  }
+
+  // Tutup CDP sessions & pages
+  for (const [symbol, client] of streamingState.cdpClients.entries()) {
+    try {
+      await client.detach();
+    } catch {}
+  }
+  streamingState.cdpClients.clear();
+
+  for (const [symbol, page] of streamingState.pages.entries()) {
+    try {
+      if (!page.isClosed()) await page.close();
+    } catch {}
+  }
+  streamingState.pages.clear();
+
+  // Tutup browser
+  if (streamingState.browser) {
+    try {
+      await streamingState.browser.close();
+    } catch {}
+    streamingState.browser = null;
+  }
+
+  streamingState.isRunning = false;
+  console.log('✅ Real-Time Orderbook Stream berhasil dihentikan secara bersih.');
+
+  return {
+    status: 'stopped',
+    message: 'Layanan streaming Orderbook telah dihentikan',
+    reason,
+    totalSessionsSaved: streamingState.totalSessionsSaved,
+    lastFlushTime: streamingState.lastFlushTime,
+  };
+}
+
+/**
+ * Mengambil status terkini dari streaming real-time Orderbook
+ */
+export function getRealtimeOrderbookStatus() {
+  return {
+    isRunning: streamingState.isRunning,
+    monitoredSymbols: streamingState.monitoredSymbols,
+    intervalSeconds: streamingState.intervalMs / 1000,
+    startTime: streamingState.startTime,
+    lastFlushTime: streamingState.lastFlushTime,
+    totalSessionsSaved: streamingState.totalSessionsSaved,
+    activeTabs: streamingState.pages.size,
+    marketSession: getMarketSession(),
+  };
+}
+
+// Alias fungsi
+export const getStreamStatus = getRealtimeOrderbookStatus;
+
+/* ============================================================================
+ * BAGIAN 3: WORKFLOW LAMA (BACKWARD COMPATIBILITY)
+ * ============================================================================ */
+
+/**
+ * Ekstraksi Orderbook dan Broker Summary lengkap (Workflow sebelumnya)
+ */
+export async function scrapeStockDetail(page, symbol) {
+  const broksumData = await extractBrokerSummaryOnly(page, symbol);
+  const orderbookData = await extractOrderbookFromPage(page, symbol);
+
+  let formattedOrderbook = [];
+  if (orderbookData && orderbookData.rawRows) {
+    formattedOrderbook = orderbookData.rawRows.map((row, index) => ({
+      level_order: index + 1,
+      bidFreq: Math.round(parseAbbreviatedNumber(row.bidFreq)),
+      bidLot: Math.round(parseAbbreviatedNumber(row.bidLot)),
+      bidPrice: Math.round(parseAbbreviatedNumber(row.bidPrice)),
+      offerPrice: Math.round(parseAbbreviatedNumber(row.offerPrice)),
+      offerLot: Math.round(parseAbbreviatedNumber(row.offerLot)),
+      offerFreq: Math.round(parseAbbreviatedNumber(row.offerFreq)),
+    }));
+  }
+
+  return {
+    stockCode: symbol.toUpperCase().trim(),
+    lastPrice: broksumData.lastPrice,
+    priceChangePct: broksumData.priceChangePct,
+    tradeDate: broksumData.tradeDate,
+    capturedAt: new Date().toISOString(),
+    orderbookList: formattedOrderbook,
+    broksumList: broksumData.broksumList,
+  };
+}
+
+/**
+ * Workflow gabungan lama untuk scraping watchlist
  */
 export async function captureWatchlistWorkflow({
   symbols = null,
@@ -908,40 +1334,22 @@ export async function captureWatchlistWorkflow({
   const failedList = [];
 
   try {
-    // 1. Luncurkan browser Chromium
-    console.log(`🚀 Menjalankan Puppeteer Chromium (headless: ${headless})...`);
     browser = await puppeteer.launch({
       headless: headless ? 'new' : false,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-accelerated-2d-canvas',
-        '--disable-gpu',
-        '--window-size=1920,1080',
-      ],
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--window-size=1920,1080'],
     });
 
     const page = await browser.newPage();
     await page.setViewport({ width: 1920, height: 1080 });
-
-    // Set User-Agent desktop modern
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     );
 
-    // 2. Pasang session cookies agar dapat mengakses data penuh Stockbit (termasuk Broker Summary)
     const hasCookies = await applyCookies(page);
-
-    // 3. Tentukan daftar kode emiten
     let targetSymbols = symbols;
     if (!targetSymbols || targetSymbols.length === 0) {
       if (!hasCookies) {
-        throw new Error(
-          'Tidak dapat mengakses Watchlist karena file cookies.json belum tersedia (akun belum login). ' +
-          'Silakan jalankan "npm run login" di terminal backend terlebih dahulu untuk login manual dan menyimpan cookies sesi, ' +
-          'atau tentukan daftar emiten secara eksplisit pada body request: { "symbols": ["BBCA", "BBRI"] }.'
-        );
+        throw new Error('File cookies.json diperlukan untuk membaca watchlist.');
       }
       targetSymbols = await getWatchlistSymbols(page);
     }
@@ -950,24 +1358,14 @@ export async function captureWatchlistWorkflow({
       targetSymbols = targetSymbols.slice(0, Number(limit));
     }
 
-    console.log(`🎯 Total emiten yang akan diproses: ${targetSymbols.length}`);
-
-    // 4. Iterasi tiap emiten secara berurutan
     for (let i = 0; i < targetSymbols.length; i++) {
       const symbol = targetSymbols[i].toUpperCase().trim();
-      console.log(`\n--------------------------------------------------`);
-      console.log(`[${i + 1}/${targetSymbols.length}] Memproses emiten: ${symbol}`);
-
       try {
-        // Ekstraksi data Orderbook & Broker Summary
         const stockData = await scrapeStockDetail(page, symbol);
-
-        // Panggil callback penyimpanan ke database jika disediakan
         let saveResult = null;
         if (typeof onStockCaptured === 'function') {
           saveResult = await onStockCaptured(stockData);
         }
-
         successList.push({
           symbol,
           lastPrice: stockData.lastPrice,
@@ -977,31 +1375,16 @@ export async function captureWatchlistWorkflow({
           broksumCount: stockData.broksumList.length,
           sessionId: saveResult?.sessionId || null,
         });
-
-        console.log(
-          `✅ Berhasil: ${symbol} (Harga: ${stockData.lastPrice}, OB: ${stockData.orderbookList.length} baris, BS: ${stockData.broksumList.length} broker)`
-        );
       } catch (err) {
-        console.error(`❌ Gagal memproses emiten ${symbol}:`, err.message);
-        failedList.push({
-          symbol,
-          error: err.message,
-        });
+        failedList.push({ symbol, error: err.message });
       }
 
-      // Jeda acak antar-emiten (1.5 - 3 detik) untuk mematuhi rate limit & pola wajar manusia
       if (i < targetSymbols.length - 1) {
-        const delayMs = Math.floor(Math.random() * (3000 - 1500 + 1)) + 1500;
-        console.log(`⏳ Jeda ${delayMs}ms sebelum emiten berikutnya...`);
-        await new Promise((r) => setTimeout(r, delayMs));
+        await randomDelay(1500, 3000);
       }
     }
 
     const durationSeconds = ((Date.now() - startTime) / 1000).toFixed(2);
-    console.log(`\n==================================================`);
-    console.log(`🏁 Selesai! Diproses dalam ${durationSeconds} detik.`);
-    console.log(`   Sukses: ${successList.length}, Gagal: ${failedList.length}`);
-
     return {
       success: true,
       durationSeconds: Number(durationSeconds),
@@ -1012,18 +1395,12 @@ export async function captureWatchlistWorkflow({
       failedList,
     };
   } finally {
-    // 5. Selalu tutup browser di akhir proses untuk mencegah memory leak
-    if (browser) {
-      await browser.close();
-      console.log('🔒 Browser instance Chromium berhasil ditutup.');
-    }
+    if (browser) await browser.close();
   }
 }
 
 /**
- * Helper tunggal untuk melakukan capture 1 emiten secara mandiri
- * @param {string} stockCode
- * @param {boolean} [headless=true]
+ * Capture 1 emiten tunggal (kompatibilitas lama)
  */
 export async function captureSingleStock(stockCode, headless = true) {
   let browser;
@@ -1038,11 +1415,43 @@ export async function captureSingleStock(stockCode, headless = true) {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36'
     );
     await applyCookies(page);
-
     return await scrapeStockDetail(page, stockCode);
   } finally {
-    if (browser) {
-      await browser.close();
-    }
+    if (browser) await browser.close();
   }
 }
+
+// Tangani sinyal sistem untuk graceful shutdown
+process.on('SIGINT', async () => {
+  if (streamingState.isRunning) {
+    console.log('\n🛑 Menerima sinyal SIGINT...');
+    await stopRealtimeOrderbookStream('SIGINT');
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  if (streamingState.isRunning) {
+    console.log('\n🛑 Menerima sinyal SIGTERM...');
+    await stopRealtimeOrderbookStream('SIGTERM');
+  }
+  process.exit(0);
+});
+
+
+// Tangani sinyal sistem untuk graceful shutdown
+process.on('SIGINT', async () => {
+  if (streamingState.isRunning) {
+    console.log('\n🛑 Menerima sinyal SIGINT...');
+    await stopRealtimeOrderbookStream('SIGINT');
+  }
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  if (streamingState.isRunning) {
+    console.log('\n🛑 Menerima sinyal SIGTERM...');
+    await stopRealtimeOrderbookStream('SIGTERM');
+  }
+  process.exit(0);
+});
