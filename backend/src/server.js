@@ -23,11 +23,17 @@ app.use('/api', stockRoutes);
 app.use(notFoundHandler);
 app.use(errorHandler);
 
-// Jalankan server HTTP
-app.listen(PORT, async () => {
-  console.log(`🚀 Server backend berjalan di http://localhost:${PORT}`);
-  // Otomatis tes koneksi database saat server menyala
-  await testDatabaseConnection();
-});
+import { fileURLToPath } from 'url';
+
+// Jalankan server HTTP hanya jika file ini dijalankan langsung (bukan saat di-import oleh test suite)
+const isMainModule = process.argv[1] && fileURLToPath(import.meta.url).toLowerCase() === process.argv[1].toLowerCase();
+
+if (isMainModule) {
+  app.listen(PORT, async () => {
+    console.log(`🚀 Server backend berjalan di http://localhost:${PORT}`);
+    // Otomatis tes koneksi database saat server menyala
+    await testDatabaseConnection();
+  });
+}
 
 export default app;

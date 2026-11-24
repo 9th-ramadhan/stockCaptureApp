@@ -10,7 +10,8 @@
     "db:migrate": "node database/migrate.js",
     "stream:orderbook": "node src/scripts/runOrderbookStream.js",
     "capture:orderbook": "node src/scripts/runOrderbookSnapshot.js",
-    "capture:broksum": "node src/scripts/runDailyBroksum.js"
+    "capture:broksum": "node src/scripts/runDailyBroksum.js",
+    "test": "node --test tests/**/*.test.js"
   },
   "keywords": [],
   "author": "",
