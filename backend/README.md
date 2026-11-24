@@ -242,10 +242,25 @@ CREATE TABLE broker_summaries (
 
 ## 🍪 Manajemen Sesi & Cookies Stockbit
 
-Stockbit mewajibkan sesi login untuk data Watchlist dan Broker Summary.
+Stockbit mewajibkan sesi login untuk data Watchlist dan Broker Summary. Sistem dilengkapi dengan **Fallback Otomatis saat Cookies Kedaluwarsa**:
 
-### Export Cookies Cepat via Chrome DevTools:
-1. Buka browser Chrome dan login ke [https://stockbit.com](https://stockbit.com).
+### 1. Fallback Otomatis Saat Sesi Kedaluwarsa (Auto-Relogin)
+Jika proses scraping mendeteksi bahwa sesi cookies sudah kedaluwarsa (terdeteksi redirect ke `stockbit.com/login`):
+- Sistem **secara otomatis membuka jendela browser Chromium** (`headless: false`) langsung ke halaman login Stockbit.
+- Pengguna cukup melakukan login manual di jendela tersebut.
+- Sistem **otomatis mendeteksi token sesi**, menyalin seluruh cookies terbaru, dan **langsung memperbarui `cookies.json`**.
+- Browser login manual ditutup, cookies baru langsung dipasang ke halaman scraper yang aktif, dan proses scraping dilanjutkan tanpa error.
+
+### 2. Login Manual Kapan Saja via API / NPM Script:
+- **Via REST API:** Kirim `POST /api/auth/save-session` atau buka browser ke `http://localhost:5000/api/auth/save-session`.
+- **Via CLI / Terminal:**
+  ```powershell
+  npm run login
+  ```
+  Jendela browser akan terbuka, login ke akun Anda, dan `cookies.json` akan ter-update otomatis.
+
+### 3. Alternatif: Export Cookies Manual via Chrome DevTools:
+1. Buka browser Chrome biasa dan login ke [https://stockbit.com](https://stockbit.com).
 2. Tekan `F12` lalu buka tab **Console**.
 3. Jalankan kode berikut:
    ```javascript

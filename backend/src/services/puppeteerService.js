@@ -278,11 +278,104 @@ export async function applyCookies(page) {
 /**
  * Fungsi opsional untuk menyimpan sesi login Stockbit (mode headless: false)
  */
+let loginInProgressPromise = null;
+
+/**
+ * Memicu sesi login manual di Chromium (headless: false) dengan mutex pencegah tab ganda.
+ * Menyalin dan memperbarui cookies.json secara otomatis saat pengguna menyelesaikan login.
+ *
+ * @param {string} [targetPath=null]
+ * @param {number} [timeoutMs=180000]
+ * @returns {Promise<Object>}
+ */
+export async function promptManualLoginAndRefreshCookies(targetPath = null, timeoutMs = 180000) {
+  if (loginInProgressPromise) {
+    console.log('⏳ Sesi login manual sedang berlangsung di jendela lain, menunggu...');
+    return await loginInProgressPromise;
+  }
+
+  loginInProgressPromise = (async () => {
+    try {
+      return await saveLoginSession(targetPath, timeoutMs);
+    } finally {
+      loginInProgressPromise = null;
+    }
+  })();
+
+  return await loginInProgressPromise;
+}
+
+/**
+ * Memastikan halaman dalam status terautentikasi.
+ * Jika terdeteksi redirect ke /login (karena cookies kedaluwarsa atau belum ada),
+ * fungsi ini otomatis membuka tab Chromium (headless: false) agar pengguna login manual,
+ * langsung menyalin cookies baru ke cookies.json, memasangnya ke page aktif, dan memuat ulang URL target.
+ *
+ * @param {import('puppeteer').Page} page
+ * @param {string} targetUrl
+ * @returns {Promise<boolean>}
+ */
+export async function ensurePageAuthenticated(page, targetUrl) {
+  const currentUrl = page.url();
+  const isLoginPage =
+    currentUrl.includes('/login') ||
+    currentUrl.includes('/register') ||
+    currentUrl.includes('accounts.google.com') ||
+    (!currentUrl.includes('stockbit.com') && !currentUrl.includes('about:blank'));
+
+  if (!isLoginPage) {
+    return true;
+  }
+
+  console.warn(`\n⚠️ ============================================================`);
+  console.warn(`⚠️ Sesi login Stockbit KEDALUWARSA / BELUM LOGIN (Redirect ke: ${currentUrl})`);
+  console.warn(`🌐 MEMBUKA TAB CHROMIUM UNTUK LOGIN MANUAL PENGGUNA...`);
+  console.warn(`   Silakan lakukan login di jendela browser yang muncul.`);
+  console.warn(`   Sistem otomatis mendeteksi login, menyalin cookies, dan memperbarui cookies.json.`);
+  console.warn(`============================================================\n`);
+
+  const refreshResult = await promptManualLoginAndRefreshCookies();
+
+  if (refreshResult && refreshResult.cookies && refreshResult.cookies.length > 0) {
+    console.log(`✅ Memasang ${refreshResult.cookies.length} cookies baru ke halaman aktif...`);
+    await page.setCookie(...refreshResult.cookies);
+
+    console.log(`🔄 Mengulang navigasi ke: ${targetUrl}`);
+    await page.goto(targetUrl, {
+      waitUntil: 'domcontentloaded',
+      timeout: 35000,
+    });
+
+    const newUrl = page.url();
+    if (newUrl.includes('/login')) {
+      throw new Error('Gagal autentikasi: Halaman masih dialihkan ke /login setelah proses login manual.');
+    }
+
+    console.log(`🎉 Halaman berhasil dimuat dalam status terautentikasi!`);
+    return true;
+  } else {
+    throw new Error('Gagal memperbarui cookies sesi login.');
+  }
+}
+
+/**
+ * Fungsi untuk menyimpan sesi login Stockbit (mode headless: false)
+ * Membuka browser Chromium, mendeteksi token auth saat pengguna login,
+ * menyalin dan memperbarui file cookies.json secara instan.
+ *
+ * @param {string} [outputPath] - Jalur file output penyimpanan cookies
+ * @param {number} [timeoutMs=180000] - Batas waktu menunggu login (default 3 menit)
+ * @returns {Promise<Object>}
+ */
 export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
   const targetPath = outputPath || path.resolve(__dirname, '../../cookies.json');
-  console.log(`🚀 Meluncurkan browser untuk login manual ke Stockbit...`);
+  console.log(`🚀 Meluncurkan browser Chromium untuk login manual ke Stockbit...`);
 
   const realChromePath = findChromeExecutable();
+  if (realChromePath) {
+    console.log(`🌐 Menggunakan binary Chrome asli sistem: ${realChromePath}`);
+  }
+
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
@@ -307,23 +400,33 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
     console.log(`🔗 Membuka halaman login: https://stockbit.com/login`);
     await page.goto('https://stockbit.com/login', { waitUntil: 'networkidle2', timeout: 60000 });
 
+    console.log('⏳ Menunggu login manual di jendela browser yang terbuka...');
+    console.log('   Sistem otomatis mendeteksi login saat token auth tersimpan atau halaman berpindah.');
+
     const startTime = Date.now();
     let loggedIn = false;
 
     while (Date.now() - startTime < timeoutMs) {
       const currentUrl = page.url();
-      if (currentUrl.includes('/watchlist') || (!currentUrl.includes('/login') && !currentUrl.includes('/register'))) {
-        try {
-          await page.waitForSelector('tbody.ant-table-tbody, [class*="watchlist"]', { timeout: 8000 });
-          loggedIn = true;
-          break;
-        } catch {
-          if (currentUrl.includes('/watchlist')) {
-            loggedIn = true;
-            break;
-          }
-        }
+      const currentCookies = await page.cookies();
+
+      const hasAuthCookie = currentCookies.some(
+        (c) => c.name === 'credentialStorage' || c.name === 'sb_is_social_logged_in' || c.name === 'token'
+      );
+
+      const isNotOnLogin =
+        !currentUrl.includes('/login') &&
+        !currentUrl.includes('/register') &&
+        !currentUrl.includes('accounts.google.com') &&
+        !currentUrl.includes('google.com/signin');
+
+      if ((hasAuthCookie && isNotOnLogin) || currentUrl.includes('/watchlist')) {
+        console.log('🎯 Kondisi login terpenuhi! Memberi jeda 1 detik agar token tersimpan penuh...');
+        await new Promise((r) => setTimeout(r, 1000));
+        loggedIn = true;
+        break;
       }
+
       await new Promise((r) => setTimeout(r, 1500));
     }
 
@@ -331,18 +434,31 @@ export async function saveLoginSession(outputPath = null, timeoutMs = 180000) {
       throw new Error('Waktu tunggu login habis atau pengguna belum menyelesaikan login.');
     }
 
-    console.log('🎉 Login berhasil terdeteksi! Mengambil cookies sesi...');
+    console.log('🎉 Login berhasil terdeteksi! Mengambil dan menyalin seluruh cookies sesi...');
     const cookies = await page.cookies();
+
+    // 1. Simpan ke targetPath (backend/cookies.json)
     await fs.writeFile(targetPath, JSON.stringify(cookies, null, 2), 'utf-8');
+    console.log(`💾 ${cookies.length} cookie berhasil disimpan ke: ${targetPath}`);
+
+    // 2. Sinkronkan juga ke lokasi cookies lainnya jika ada
+    const rootCookiesPath = path.resolve(__dirname, '../../../cookies.json');
+    try {
+      if (fsSync.existsSync(path.dirname(rootCookiesPath))) {
+        await fs.writeFile(rootCookiesPath, JSON.stringify(cookies, null, 2), 'utf-8');
+      }
+    } catch {}
 
     return {
       success: true,
-      message: 'Sesi login berhasil disimpan',
+      message: 'Sesi login berhasil disimpan dan diperbarui ke cookies.json',
       cookiesCount: cookies.length,
       savedPath: targetPath,
+      cookies,
     };
   } finally {
     await browser.close();
+    console.log('🔒 Browser login manual Chromium berhasil ditutup.');
   }
 }
 
@@ -357,17 +473,20 @@ export async function getWatchlistSymbols(page) {
     timeout: 30000,
   });
 
-  const currentUrl = page.url();
-  if (currentUrl.includes('/login') || (!currentUrl.includes('/watchlist') && !currentUrl.includes('stockbit.com'))) {
-    throw new Error(
-      `Halaman Watchlist memerlukan sesi akun yang sudah login (redirect ke: ${currentUrl}). Silakan simpan cookies.json.`
-    );
+  // Jika dialihkan ke halaman login (cookies kedaluwarsa)
+  if (page.url().includes('/login')) {
+    await ensurePageAuthenticated(page, 'https://stockbit.com/watchlist');
   }
 
   try {
     await page.waitForSelector('tbody.ant-table-tbody tr.ant-table-row', { timeout: 25000 });
   } catch {
-    throw new Error('Gagal memuat baris data watchlist Stockbit (timeout 25 detik).');
+    if (page.url().includes('/login')) {
+      await ensurePageAuthenticated(page, 'https://stockbit.com/watchlist');
+      await page.waitForSelector('tbody.ant-table-tbody tr.ant-table-row', { timeout: 25000 });
+    } else {
+      throw new Error('Gagal memuat baris data watchlist Stockbit (timeout 25 detik).');
+    }
   }
 
   await new Promise((r) => setTimeout(r, 800));
@@ -426,13 +545,19 @@ export async function extractBrokerSummaryOnly(page, symbol) {
     timeout: 30000,
   });
 
+  // Jika terdeteksi dialihkan ke form login (cookies kedaluwarsa)
+  if (page.url().includes('/login')) {
+    await ensurePageAuthenticated(page, url);
+  }
+
   // Tunggu container utama
   try {
     await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
   } catch {
     const currentUrl = page.url();
     if (currentUrl.includes('/login')) {
-      throw new Error(`Sesi login expired saat membuka emiten ${stockCode}.`);
+      await ensurePageAuthenticated(page, url);
+      await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
     }
   }
 
@@ -1204,6 +1329,10 @@ export async function startRealtimeOrderbookStream(symbols = [], { intervalMs = 
       console.log(`🌐 [Stream Tab] Membuka ${symbol}: ${url}`);
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
 
+      if (page.url().includes('/login')) {
+        await ensurePageAuthenticated(page, url);
+      }
+
       // Beri jeda antar tab agar CPU tidak melonjak
       await new Promise((r) => setTimeout(r, 1500));
     }
@@ -1454,12 +1583,18 @@ export async function extractOrderbookOnly(page, symbol) {
     timeout: 30000,
   });
 
+  // Jika terdeteksi dialihkan ke form login (cookies kedaluwarsa)
+  if (page.url().includes('/login')) {
+    await ensurePageAuthenticated(page, url);
+  }
+
   try {
     await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
   } catch {
     const currentUrl = page.url();
     if (currentUrl.includes('/login')) {
-      throw new Error(`Sesi login expired saat membuka emiten ${stockCode}.`);
+      await ensurePageAuthenticated(page, url);
+      await page.waitForSelector('main#main-container, [id="main-container"]', { timeout: 15000 });
     }
   }
 

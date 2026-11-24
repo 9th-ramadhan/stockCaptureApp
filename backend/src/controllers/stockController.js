@@ -2,6 +2,7 @@ import {
   captureWatchlistWorkflow,
   captureSingleStock,
   saveLoginSession,
+  promptManualLoginAndRefreshCookies,
   captureBrokerSummaryOnly,
   captureOrderbookSnapshotOnly,
   startRealtimeOrderbookStream,
@@ -334,21 +335,23 @@ export async function handleGetSessionDetail(req, res) {
 /**
  * Controller: Menyimpan sesi login Stockbit secara interaktif
  * POST /api/auth/save-session
+ * Membuka tab Chromium untuk login manual, otomatis mendeteksi login, menyalin cookies, dan memperbarui cookies.json
  */
 export async function handleSaveLoginSession(req, res) {
   try {
     console.log('📥 Menerima permintaan POST /api/auth/save-session...');
-    const result = await saveLoginSession();
+    const result = await promptManualLoginAndRefreshCookies();
 
     return res.status(200).json({
       status: 'success',
+      message: 'Sesi login berhasil diperbarui dan disimpan ke cookies.json',
       ...result,
     });
   } catch (error) {
     console.error('❌ Error pada handleSaveLoginSession:', error);
     return res.status(500).json({
       status: 'error',
-      message: 'Gagal menyimpan sesi login Stockbit',
+      message: 'Gagal melakukan login manual atau waktu tunggu habis',
       error: error.message,
     });
   }

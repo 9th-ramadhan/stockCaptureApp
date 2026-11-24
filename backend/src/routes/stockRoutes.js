@@ -59,7 +59,9 @@ router.get('/sessions/:id', handleGetSessionDetail);
 // ============================================================================
 // 5. ENDPOINT MANAJEMEN AUTENTIKASI / SESI
 // ============================================================================
-// Buka browser untuk login manual dan simpan cookies.json
+// Buka browser untuk login manual dan simpan/perbarui cookies.json secara instan
 router.post('/auth/save-session', handleSaveLoginSession);
+router.get('/auth/save-session', handleSaveLoginSession);
+router.post('/auth/login', handleSaveLoginSession);
 
 export default router;
