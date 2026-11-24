@@ -212,11 +212,11 @@ export function checkMarketClosingTime() {
   const timeInMinutes = hour * 60 + minute;
 
   const isWeekend = weekday === 'Sat' || weekday === 'Sun';
-  const isPastClosing = timeInMinutes >= 17 * 60 + 16; // 17:16 WITA
+  const isOutsideTradingHours = timeInMinutes < 9 * 60 + 55 || timeInMinutes >= 17 * 60 + 16;
 
-  if (isWeekend || isPastClosing) {
+  if (isWeekend || isOutsideTradingHours) {
     console.log(
-      `⏰ [Stream] Batas waktu perdagangan bursa berakhir (${isWeekend ? 'Akhir Pekan' : 'Pukul 17:16 WITA'}). Menghentikan streaming secara otomatis...`
+      `⏰ [Stream] Di luar jam perdagangan bursa (${isWeekend ? 'Akhir Pekan' : 'Sebelum 09:55 atau Lewat 17:16 WITA'}). Menghentikan streaming secara otomatis...`
     );
     stopRealtimeOrderbookStream('MARKET_CLOSED');
   }
