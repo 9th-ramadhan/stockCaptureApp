@@ -1,5 +1,9 @@
 import { Router } from 'express';
 import {
+  handleCaptureBroksum,
+  handleStartOrderbookStream,
+  handleStopOrderbookStream,
+  handleGetStreamStatus,
   handleCaptureWatchlist,
   handleCaptureSymbol,
   handleGetSessions,
@@ -9,22 +13,46 @@ import {
 
 const router = Router();
 
-// Endpoint Scraping
-// 1. POST /api/capture/watchlist - Eksekusi scraping seluruh/sebagian emiten watchlist
+// ============================================================================
+// 1. ENDPOINTS STREAMING ORDERBOOK REAL-TIME (MODE 2 - CDP WEBSOCKET)
+// ============================================================================
+// Memulai streaming real-time Orderbook dengan sampling 30 detik
+router.post('/stream/orderbook/start', handleStartOrderbookStream);
+
+// Menghentikan streaming real-time Orderbook secara aman
+router.post('/stream/orderbook/stop', handleStopOrderbookStream);
+
+// Mengambil status aktivitas streaming real-time Orderbook
+router.get('/stream/orderbook/status', handleGetStreamStatus);
+
+// ============================================================================
+// 2. ENDPOINTS CAPTURE BROKER SUMMARY (MODE 1 - BATCH HARIAN)
+// ============================================================================
+// Eksekusi scraping khusus Broker Summary (melewati parsing Orderbook)
+router.post('/capture/broksum', handleCaptureBroksum);
+
+// ============================================================================
+// 3. ENDPOINTS SCRAPING EMITEN TUNGGAL & WATCHLIST GABUNGAN (LEGACY)
+// ============================================================================
+// Eksekusi scraping seluruh/sebagian emiten watchlist (Orderbook + Broksum)
 router.post('/capture/watchlist', handleCaptureWatchlist);
 
-// 2. POST /api/capture/symbol/:symbol - Eksekusi scraping 1 emiten tertentu
+// Eksekusi scraping 1 emiten tertentu
 router.post('/capture/symbol/:symbol', handleCaptureSymbol);
 
-// Endpoint Riwayat Database
-// 3. GET /api/sessions - Mengambil daftar snapshot capture sessions
+// ============================================================================
+// 4. ENDPOINTS RIWAYAT DATABASE & DETAIL SESI
+// ============================================================================
+// Mengambil daftar snapshot capture sessions
 router.get('/sessions', handleGetSessions);
 
-// 4. GET /api/sessions/:id - Mengambil detail snapshot orderbook & broker summary suatu sesi
+// Mengambil detail snapshot orderbook & broker summary suatu sesi
 router.get('/sessions/:id', handleGetSessionDetail);
 
-// Endpoint Manajemen Autentikasi / Sesi
-// 5. POST /api/auth/save-session - Buka browser untuk login manual dan simpan cookies.json
+// ============================================================================
+// 5. ENDPOINT MANAJEMEN AUTENTIKASI / SESI
+// ============================================================================
+// Buka browser untuk login manual dan simpan cookies.json
 router.post('/auth/save-session', handleSaveLoginSession);
 
 export default router;

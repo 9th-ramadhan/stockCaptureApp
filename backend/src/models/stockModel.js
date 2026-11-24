@@ -1,22 +1,95 @@
 import pool from '../config/db.js';
 
 /**
+ * Menentukan sesi perdagangan BEI/IDX saat ini berdasarkan zona waktu WITA (Asia/Makassar, UTC+8).
+ * Jam perdagangan BEI dalam WITA:
+ * - Senin - Kamis:
+ *     Sesi 1: 10:00 - 13:00 WITA (09:00 - 12:00 WIB)
+ *     Sesi 2: 14:30 - 17:00 WITA (13:30 - 16:00 WIB)
+ * - Jumat:
+ *     Sesi 1: 10:00 - 12:30 WITA (09:00 - 11:30 WIB)
+ *     Sesi 2: 15:00 - 17:00 WITA (14:00 - 16:00 WIB)
+ * - Pra-penutupan / Pasca-penutupan (Post Closing):
+ *     17:00 - 17:15 WITA (16:00 - 16:15 WIB)
+ * - Di luar jam tersebut / Akhir Pekan:
+ *     AFTER_HOURS
+ *
+ * @param {Date} [date=new Date()]
+ * @returns {'SESSION_1'|'SESSION_2'|'POST_CLOSING'|'AFTER_HOURS'}
+ */
+export function getMarketSession(date = new Date()) {
+  const d = date instanceof Date && !isNaN(date.getTime()) ? date : new Date();
+
+  // Konversi ke representasi waktu lokal WITA (Asia/Makassar)
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Asia/Makassar',
+    hour12: false,
+    weekday: 'short',
+    hour: 'numeric',
+    minute: 'numeric',
+  });
+
+  const parts = formatter.formatToParts(d);
+  const getPart = (type) => parts.find((p) => p.type === type)?.value;
+
+  const weekday = getPart('weekday'); // 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'
+  const hour = parseInt(getPart('hour') || '0', 10);
+  const minute = parseInt(getPart('minute') || '0', 10);
+  const timeInMinutes = hour * 60 + minute;
+
+  // Akhir pekan (Sabtu & Minggu)
+  if (weekday === 'Sat' || weekday === 'Sun') {
+    return 'AFTER_HOURS';
+  }
+
+  // Waktu Post-Closing (17:00 - 17:15 WITA) untuk semua hari kerja
+  if (timeInMinutes >= 17 * 60 && timeInMinutes <= 17 * 60 + 15) {
+    return 'POST_CLOSING';
+  }
+
+  if (weekday === 'Fri') {
+    // Jumat: Sesi 1 (10:00 - 12:30 WITA)
+    if (timeInMinutes >= 10 * 60 && timeInMinutes < 12 * 60 + 30) {
+      return 'SESSION_1';
+    }
+    // Jumat: Sesi 2 (15:00 - 17:00 WITA)
+    if (timeInMinutes >= 15 * 60 && timeInMinutes < 17 * 60) {
+      return 'SESSION_2';
+    }
+  } else {
+    // Senin - Kamis: Sesi 1 (10:00 - 13:00 WITA)
+    if (timeInMinutes >= 10 * 60 && timeInMinutes < 13 * 60) {
+      return 'SESSION_1';
+    }
+    // Senin - Kamis: Sesi 2 (14:30 - 17:00 WITA)
+    if (timeInMinutes >= 14 * 60 + 30 && timeInMinutes < 17 * 60) {
+      return 'SESSION_2';
+    }
+  }
+
+  return 'AFTER_HOURS';
+}
+
+/**
  * Menyimpan data snapshot capture emiten (Orderbook dan/atau Broker Summary)
  * secara transaksional ke MySQL menggunakan bulk insert.
  *
- * Tabel yang dipengaruhi:
- * 1. capture_sessions
- * 2. orderbook_entries (bulk insert)
- * 3. broker_summaries (bulk insert)
+ * Mendukung pemisahan capture_type:
+ * - 'ORDERBOOK': Hanya menyisipkan record ke capture_sessions dan orderbook_entries.
+ * - 'BROKSUM': Menghapus data broksum lama pada (stock_code, trade_date) lalu insert ke broker_summaries.
+ * - 'BOTH': Menyimpan kedua entitas sekaligus.
  *
  * @param {Object} captureData
  * @param {string} captureData.stockCode - Kode saham (misal: 'BBCA')
- * @param {number|null} captureData.lastPrice - Harga terakhir
- * @param {number|null} captureData.priceChangePct - Persentase perubahan harga
+ * @param {number|null} [captureData.lastPrice] - Harga terakhir
+ * @param {number|null} [captureData.priceChangePct] - Persentase perubahan harga
  * @param {string} [captureData.tradeDate] - Tanggal transaksi (YYYY-MM-DD)
  * @param {Date|string} [captureData.capturedAt] - Timestamp pengambilan data
+ * @param {'ORDERBOOK'|'BROKSUM'|'BOTH'} [captureData.captureType] - Jenis snapshot
+ * @param {'SESSION_1'|'SESSION_2'|'POST_CLOSING'|'AFTER_HOURS'} [captureData.marketSession] - Sesi bursa
  * @param {Array<Object>} [captureData.orderbookList] - Array baris antrean orderbook
  * @param {Array<Object>} [captureData.broksumList] - Array baris data broker summary
+ * @param {number|boolean} [captureData.isDailyFinal=1] - Flag 1 jika data broksum harian final
  * @returns {Promise<Object>} Informasi hasil penyimpanan transaksi
  */
 export async function saveStockCapture({
@@ -25,8 +98,11 @@ export async function saveStockCapture({
   priceChangePct = null,
   tradeDate = null,
   capturedAt = null,
+  captureType = null,
+  marketSession = null,
   orderbookList = [],
   broksumList = [],
+  isDailyFinal = 1,
 }) {
   const code = stockCode.toUpperCase().trim();
   const connection = await pool.getConnection();
@@ -38,16 +114,26 @@ export async function saveStockCapture({
   // Tentukan trade date default jika tidak ada (YYYY-MM-DD)
   const effectiveTradeDate = tradeDate || formattedCapturedAt.slice(0, 10);
 
-  // Tentukan capture_type
-  let captureType = 'BOTH';
+  // Tentukan capture_type jika tidak dispesifikasikan secara eksplisit
   const hasOb = Array.isArray(orderbookList) && orderbookList.length > 0;
   const hasBs = Array.isArray(broksumList) && broksumList.length > 0;
 
-  if (hasOb && !hasBs) {
-    captureType = 'ORDERBOOK';
-  } else if (!hasOb && hasBs) {
-    captureType = 'BROKSUM';
+  let effectiveCaptureType = captureType;
+  if (!effectiveCaptureType) {
+    if (hasOb && !hasBs) {
+      effectiveCaptureType = 'ORDERBOOK';
+    } else if (!hasOb && hasBs) {
+      effectiveCaptureType = 'BROKSUM';
+    } else {
+      effectiveCaptureType = 'BOTH';
+    }
   }
+
+  // Tentukan market_session
+  const validMarketSessions = ['SESSION_1', 'SESSION_2', 'POST_CLOSING', 'AFTER_HOURS'];
+  const effectiveMarketSession = validMarketSessions.includes(marketSession)
+    ? marketSession
+    : getMarketSession(now);
 
   try {
     // Mulai transaksi database
@@ -58,15 +144,17 @@ export async function saveStockCapture({
       INSERT INTO capture_sessions (
         stock_code,
         capture_type,
+        market_session,
         last_price,
         price_change_pct,
         captured_at
-      ) VALUES (?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?)
     `;
 
     const [sessionResult] = await connection.query(insertSessionSql, [
       code,
-      captureType,
+      effectiveCaptureType,
+      effectiveMarketSession,
       lastPrice !== null && !isNaN(lastPrice) ? Math.round(Number(lastPrice)) : null,
       priceChangePct !== null && !isNaN(priceChangePct) ? Number(priceChangePct) : null,
       formattedCapturedAt,
@@ -74,9 +162,9 @@ export async function saveStockCapture({
 
     const sessionId = sessionResult.insertId;
 
-    // 2. Bulk insert ke tabel orderbook_entries jika data tersedia
+    // 2. Bulk insert ke tabel orderbook_entries jika capture_type mendukung dan data ada
     let insertedOrderbookCount = 0;
-    if (hasOb) {
+    if (effectiveCaptureType !== 'BROKSUM' && hasOb) {
       const obSql = `
         INSERT INTO orderbook_entries (
           session_id,
@@ -95,7 +183,7 @@ export async function saveStockCapture({
       const obValues = orderbookList.map((entry, index) => [
         sessionId,
         code,
-        entry.level_order || (index + 1),
+        entry.level_order || index + 1,
         Number(entry.bidFreq ?? entry.bid_freq ?? 0) || 0,
         Number(entry.bidLot ?? entry.bid_lot ?? 0) || 0,
         entry.bidPrice !== null && entry.bidPrice !== undefined && !isNaN(entry.bidPrice) && Number(entry.bidPrice) > 0
@@ -113,10 +201,15 @@ export async function saveStockCapture({
       insertedOrderbookCount = obValues.length;
     }
 
-    // 3. Bulk insert ke tabel broker_summaries jika data tersedia
-    // Perhatikan: net_lot dan net_value adalah kolom VIRTUAL/STORED sehingga tidak dimasukkan ke dalam INSERT
+    // 3. Bulk insert ke tabel broker_summaries jika capture_type mendukung dan data ada
     let insertedBroksumCount = 0;
-    if (hasBs) {
+    if (effectiveCaptureType !== 'ORDERBOOK' && hasBs) {
+      // Hapus data broksum lama pada stock_code dan trade_date yang sama agar data harian tidak duplikat
+      await connection.query(
+        'DELETE FROM broker_summaries WHERE stock_code = ? AND trade_date = ?',
+        [code, effectiveTradeDate]
+      );
+
       const bsSql = `
         INSERT INTO broker_summaries (
           session_id,
@@ -130,6 +223,7 @@ export async function saveStockCapture({
           sell_lot,
           sell_value,
           avg_sell_price,
+          is_daily_final,
           captured_at
         ) VALUES ?
       `;
@@ -153,6 +247,7 @@ export async function saveStockCapture({
           Number(item.sellLot ?? item.sell_lot ?? 0) || 0,
           Number(item.sellValue ?? item.sell_value ?? 0) || 0,
           Number(item.avgSellPrice ?? item.avg_sell_price ?? 0) || 0,
+          isDailyFinal ? 1 : 0,
           formattedCapturedAt,
         ];
       });
@@ -168,7 +263,8 @@ export async function saveStockCapture({
       success: true,
       sessionId,
       stockCode: code,
-      captureType,
+      captureType: effectiveCaptureType,
+      marketSession: effectiveMarketSession,
       lastPrice,
       priceChangePct,
       tradeDate: effectiveTradeDate,
@@ -186,6 +282,9 @@ export async function saveStockCapture({
     connection.release();
   }
 }
+
+// Alias untuk kompatibilitas nama
+export const saveCaptureData = saveStockCapture;
 
 /**
  * Mengambil daftar riwayat capture sessions terbaru
@@ -210,6 +309,7 @@ export async function getSessions({ limit = 20, offset = 0, stockCode = null } =
       s.id,
       s.stock_code,
       s.capture_type,
+      s.market_session,
       s.last_price,
       s.price_change_pct,
       s.captured_at,

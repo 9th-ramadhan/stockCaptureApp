@@ -2,6 +2,10 @@ import {
   captureWatchlistWorkflow,
   captureSingleStock,
   saveLoginSession,
+  captureBrokerSummaryOnly,
+  startRealtimeOrderbookStream,
+  stopRealtimeOrderbookStream,
+  getRealtimeOrderbookStatus,
 } from '../services/puppeteerService.js';
 import {
   saveStockCapture,
@@ -10,28 +14,148 @@ import {
 } from '../models/stockModel.js';
 
 /**
- * Controller: Menjalankan scraping watchlist dan menyimpan data ke MySQL
- * POST /api/capture/watchlist
+ * Controller: Menjalankan capture khusus Broker Summary (Mode 1 Batch Harian)
+ * POST /api/capture/broksum
  * Body (opsional):
  * {
- *   "symbols": ["BBCA", "BBRI"], // Jika diisi, hanya scrape emiten ini
- *   "limit": 5,                   // Batasi jumlah emiten
- *   "headless": true              // Mode headless (default: true)
+ *   "symbols": ["BBCA", "BBRI"],
+ *   "limit": 10,
+ *   "headless": true
  * }
+ */
+export async function handleCaptureBroksum(req, res) {
+  try {
+    const { symbols, limit, headless = true } = req.body || {};
+    console.log('📥 Menerima permintaan POST /api/capture/broksum...');
+
+    const result = await captureBrokerSummaryOnly(
+      Array.isArray(symbols) && symbols.length > 0 ? symbols : [],
+      {
+        limit: limit ? Number(limit) : null,
+        headless: headless !== false,
+      }
+    );
+
+    return res.status(200).json({
+      status: 'success',
+      message: 'Proses capture Broker Summary selesai',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Error pada handleCaptureBroksum:', error.message);
+    const isAuthError =
+      error.message.includes('cookies.json') ||
+      error.message.includes('login') ||
+      error.message.includes('Sesi');
+
+    return res.status(isAuthError ? 401 : 500).json({
+      status: 'error',
+      requiresLogin: isAuthError,
+      message: isAuthError
+        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses Broker Summary.'
+        : 'Gagal menjalankan capture Broker Summary',
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Controller: Memulai layanan streaming real-time Orderbook via CDP WebSocket (Mode 2)
+ * POST /api/stream/orderbook/start
+ * Body (opsional):
+ * {
+ *   "symbols": ["BBCA", "BBRI"],
+ *   "intervalSeconds": 30,
+ *   "headless": true
+ * }
+ */
+export async function handleStartOrderbookStream(req, res) {
+  try {
+    const { symbols, intervalSeconds = 30, headless = true } = req.body || {};
+    console.log('📥 Menerima permintaan POST /api/stream/orderbook/start...');
+
+    const intervalMs = Math.max(5000, Number(intervalSeconds || 30) * 1000);
+
+    const result = await startRealtimeOrderbookStream(
+      Array.isArray(symbols) && symbols.length > 0 ? symbols : [],
+      {
+        intervalMs,
+        headless: headless !== false,
+      }
+    );
+
+    return res.status(200).json({
+      status: 'success',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Error pada handleStartOrderbookStream:', error.message);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Gagal memulai layanan streaming Orderbook',
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Controller: Menghentikan layanan streaming real-time Orderbook secara aman
+ * POST /api/stream/orderbook/stop
+ */
+export async function handleStopOrderbookStream(req, res) {
+  try {
+    console.log('📥 Menerima permintaan POST /api/stream/orderbook/stop...');
+    const result = await stopRealtimeOrderbookStream('API_REQUEST');
+
+    return res.status(200).json({
+      status: 'success',
+      data: result,
+    });
+  } catch (error) {
+    console.error('❌ Error pada handleStopOrderbookStream:', error.message);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Gagal menghentikan layanan streaming Orderbook',
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Controller: Mengambil status aktivitas streaming real-time Orderbook
+ * GET /api/stream/orderbook/status
+ */
+export function handleGetStreamStatus(req, res) {
+  try {
+    const status = getRealtimeOrderbookStatus();
+    return res.status(200).json({
+      status: 'success',
+      data: status,
+    });
+  } catch (error) {
+    console.error('❌ Error pada handleGetStreamStatus:', error.message);
+    return res.status(500).json({
+      status: 'error',
+      message: 'Gagal mengambil status streaming',
+      error: error.message,
+    });
+  }
+}
+
+/**
+ * Controller: Menjalankan scraping watchlist dan menyimpan data ke MySQL (Kompatibilitas lama)
+ * POST /api/capture/watchlist
  */
 export async function handleCaptureWatchlist(req, res) {
   try {
     const { symbols, limit, headless = true } = req.body || {};
-
     console.log('📥 Menerima permintaan POST /api/capture/watchlist...');
 
-    // Eksekusi workflow capture dengan callback penyimpanan ke MySQL
     const result = await captureWatchlistWorkflow({
       symbols: Array.isArray(symbols) && symbols.length > 0 ? symbols : null,
       limit: limit ? Number(limit) : null,
       headless: headless !== false,
       onStockCaptured: async (stockData) => {
-        // Simpan setiap emiten ke MySQL secara transaksional
         return await saveStockCapture(stockData);
       },
     });
@@ -54,9 +178,6 @@ export async function handleCaptureWatchlist(req, res) {
       message: isAuthError
         ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses halaman Watchlist.'
         : 'Gagal menjalankan capture watchlist',
-      solution: isAuthError
-        ? 'Silakan jalankan "npm run login" di folder backend untuk login manual dan menyimpan cookies.json, atau berikan daftar emiten langsung pada request: { "symbols": ["BBCA", "BBRI"] }'
-        : undefined,
       error: error.message,
     });
   }
@@ -81,11 +202,7 @@ export async function handleCaptureSymbol(req, res) {
 
   try {
     console.log(`📥 Menerima permintaan capture emiten tunggal: ${stockCode}`);
-
-    // Scrape data emiten
     const stockData = await captureSingleStock(stockCode, headless !== false);
-
-    // Simpan ke MySQL secara transaksional
     const saved = await saveStockCapture(stockData);
 
     return res.status(200).json({
@@ -110,7 +227,6 @@ export async function handleCaptureSymbol(req, res) {
 /**
  * Controller: Mengambil daftar riwayat capture sessions
  * GET /api/sessions
- * Query params: ?limit=20&offset=0&stockCode=BBCA
  */
 export async function handleGetSessions(req, res) {
   try {
@@ -138,7 +254,7 @@ export async function handleGetSessions(req, res) {
 }
 
 /**
- * Controller: Mengambil detail snapshot 1 session (termasuk orderbook dan broksum)
+ * Controller: Mengambil detail snapshot 1 session
  * GET /api/sessions/:id
  */
 export async function handleGetSessionDetail(req, res) {
