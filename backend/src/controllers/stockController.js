@@ -1,7 +1,6 @@
 import {
   captureWatchlistWorkflow,
   captureSingleStock,
-  saveLoginSession,
   promptManualLoginAndRefreshCookies,
   captureBrokerSummaryOnly,
   captureOrderbookSnapshotOnly,
@@ -18,14 +17,8 @@ import {
 /**
  * Controller: Menjalankan capture snapshot Orderbook terakhir (Fallback di luar jam bursa / On-Demand)
  * POST /api/capture/orderbook
- * Body (opsional):
- * {
- *   "symbols": ["BBCA", "BBRI"],
- *   "limit": 10,
- *   "headless": true
- * }
  */
-export async function handleCaptureOrderbook(req, res) {
+export async function handleCaptureOrderbook(req, res, next) {
   try {
     const { symbols, limit, headless = true } = req.body || {};
     console.log('📥 Menerima permintaan POST /api/capture/orderbook (Snapshot)...');
@@ -44,34 +37,16 @@ export async function handleCaptureOrderbook(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleCaptureOrderbook:', error.message);
-    const isAuthError =
-      error.message.includes('cookies.json') ||
-      error.message.includes('login') ||
-      error.message.includes('Sesi');
-
-    return res.status(isAuthError ? 401 : 500).json({
-      status: 'error',
-      requiresLogin: isAuthError,
-      message: isAuthError
-        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses Orderbook.'
-        : 'Gagal menjalankan capture snapshot Orderbook',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal menjalankan capture snapshot Orderbook';
+    next(error);
   }
 }
 
 /**
  * Controller: Menjalankan capture khusus Broker Summary (Mode 1 Batch Harian)
  * POST /api/capture/broksum
- * Body (opsional):
- * {
- *   "symbols": ["BBCA", "BBRI"],
- *   "limit": 10,
- *   "headless": true
- * }
  */
-export async function handleCaptureBroksum(req, res) {
+export async function handleCaptureBroksum(req, res, next) {
   try {
     const { symbols, limit, headless = true } = req.body || {};
     console.log('📥 Menerima permintaan POST /api/capture/broksum...');
@@ -90,34 +65,16 @@ export async function handleCaptureBroksum(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleCaptureBroksum:', error.message);
-    const isAuthError =
-      error.message.includes('cookies.json') ||
-      error.message.includes('login') ||
-      error.message.includes('Sesi');
-
-    return res.status(isAuthError ? 401 : 500).json({
-      status: 'error',
-      requiresLogin: isAuthError,
-      message: isAuthError
-        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses Broker Summary.'
-        : 'Gagal menjalankan capture Broker Summary',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal menjalankan capture Broker Summary';
+    next(error);
   }
 }
 
 /**
  * Controller: Memulai layanan streaming real-time Orderbook via CDP WebSocket (Mode 2)
  * POST /api/stream/orderbook/start
- * Body (opsional):
- * {
- *   "symbols": ["BBCA", "BBRI"],
- *   "intervalSeconds": 30,
- *   "headless": true
- * }
  */
-export async function handleStartOrderbookStream(req, res) {
+export async function handleStartOrderbookStream(req, res, next) {
   try {
     const { symbols, intervalSeconds = 30, headless = true } = req.body || {};
     console.log('📥 Menerima permintaan POST /api/stream/orderbook/start...');
@@ -137,12 +94,8 @@ export async function handleStartOrderbookStream(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleStartOrderbookStream:', error.message);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Gagal memulai layanan streaming Orderbook',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal memulai layanan streaming Orderbook';
+    next(error);
   }
 }
 
@@ -150,7 +103,7 @@ export async function handleStartOrderbookStream(req, res) {
  * Controller: Menghentikan layanan streaming real-time Orderbook secara aman
  * POST /api/stream/orderbook/stop
  */
-export async function handleStopOrderbookStream(req, res) {
+export async function handleStopOrderbookStream(req, res, next) {
   try {
     console.log('📥 Menerima permintaan POST /api/stream/orderbook/stop...');
     const result = await stopRealtimeOrderbookStream('API_REQUEST');
@@ -160,12 +113,8 @@ export async function handleStopOrderbookStream(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleStopOrderbookStream:', error.message);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Gagal menghentikan layanan streaming Orderbook',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal menghentikan layanan streaming Orderbook';
+    next(error);
   }
 }
 
@@ -173,7 +122,7 @@ export async function handleStopOrderbookStream(req, res) {
  * Controller: Mengambil status aktivitas streaming real-time Orderbook
  * GET /api/stream/orderbook/status
  */
-export function handleGetStreamStatus(req, res) {
+export function handleGetStreamStatus(req, res, next) {
   try {
     const status = getRealtimeOrderbookStatus();
     return res.status(200).json({
@@ -181,12 +130,8 @@ export function handleGetStreamStatus(req, res) {
       data: status,
     });
   } catch (error) {
-    console.error('❌ Error pada handleGetStreamStatus:', error.message);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Gagal mengambil status streaming',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal mengambil status streaming';
+    next(error);
   }
 }
 
@@ -194,7 +139,7 @@ export function handleGetStreamStatus(req, res) {
  * Controller: Menjalankan scraping watchlist dan menyimpan data ke MySQL (Kompatibilitas lama)
  * POST /api/capture/watchlist
  */
-export async function handleCaptureWatchlist(req, res) {
+export async function handleCaptureWatchlist(req, res, next) {
   try {
     const { symbols, limit, headless = true } = req.body || {};
     console.log('📥 Menerima permintaan POST /api/capture/watchlist...');
@@ -214,20 +159,8 @@ export async function handleCaptureWatchlist(req, res) {
       data: result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleCaptureWatchlist:', error.message);
-    const isAuthError =
-      error.message.includes('cookies.json') ||
-      error.message.includes('login') ||
-      error.message.includes('Sesi');
-
-    return res.status(isAuthError ? 401 : 500).json({
-      status: 'error',
-      requiresLogin: isAuthError,
-      message: isAuthError
-        ? 'Sesi akun Stockbit (cookies.json) diperlukan untuk mengakses halaman Watchlist.'
-        : 'Gagal menjalankan capture watchlist',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal menjalankan capture watchlist';
+    next(error);
   }
 }
 
@@ -235,20 +168,19 @@ export async function handleCaptureWatchlist(req, res) {
  * Controller: Menjalankan capture untuk 1 emiten spesifik
  * POST /api/capture/symbol/:symbol
  */
-export async function handleCaptureSymbol(req, res) {
-  const { symbol } = req.params;
-  const { headless = true } = req.body || {};
-
-  if (!symbol) {
-    return res.status(400).json({
-      status: 'error',
-      message: 'Parameter simbol saham wajib diisi',
-    });
-  }
-
-  const stockCode = symbol.toUpperCase().trim();
-
+export async function handleCaptureSymbol(req, res, next) {
   try {
+    const { symbol } = req.params;
+    const { headless = true } = req.body || {};
+
+    if (!symbol) {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Parameter simbol saham wajib diisi',
+      });
+    }
+
+    const stockCode = symbol.toUpperCase().trim();
     console.log(`📥 Menerima permintaan capture emiten tunggal: ${stockCode}`);
     const stockData = await captureSingleStock(stockCode, headless !== false);
     const saved = await saveStockCapture(stockData);
@@ -263,12 +195,8 @@ export async function handleCaptureSymbol(req, res) {
       },
     });
   } catch (error) {
-    console.error(`❌ Error pada handleCaptureSymbol (${stockCode}):`, error);
-    return res.status(500).json({
-      status: 'error',
-      message: `Gagal melakukan capture untuk emiten ${stockCode}`,
-      error: error.message,
-    });
+    error.customMessage = `Gagal melakukan capture untuk emiten ${req.params?.symbol || ''}`;
+    next(error);
   }
 }
 
@@ -276,7 +204,7 @@ export async function handleCaptureSymbol(req, res) {
  * Controller: Mengambil daftar riwayat capture sessions
  * GET /api/sessions
  */
-export async function handleGetSessions(req, res) {
+export async function handleGetSessions(req, res, next) {
   try {
     const { limit = 20, offset = 0, stockCode = null } = req.query;
 
@@ -292,12 +220,8 @@ export async function handleGetSessions(req, res) {
       count: sessions.length,
     });
   } catch (error) {
-    console.error('❌ Error pada handleGetSessions:', error);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Gagal mengambil riwayat capture sessions',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal mengambil riwayat capture sessions';
+    next(error);
   }
 }
 
@@ -305,10 +229,9 @@ export async function handleGetSessions(req, res) {
  * Controller: Mengambil detail snapshot 1 session
  * GET /api/sessions/:id
  */
-export async function handleGetSessionDetail(req, res) {
-  const { id } = req.params;
-
+export async function handleGetSessionDetail(req, res, next) {
   try {
+    const { id } = req.params;
     const detail = await getSessionDetail(id);
 
     if (!detail) {
@@ -323,21 +246,16 @@ export async function handleGetSessionDetail(req, res) {
       data: detail,
     });
   } catch (error) {
-    console.error(`❌ Error pada handleGetSessionDetail (${id}):`, error);
-    return res.status(500).json({
-      status: 'error',
-      message: `Gagal mengambil detail sesi capture ID ${id}`,
-      error: error.message,
-    });
+    error.customMessage = `Gagal mengambil detail sesi capture ID ${req.params?.id || ''}`;
+    next(error);
   }
 }
 
 /**
  * Controller: Menyimpan sesi login Stockbit secara interaktif
  * POST /api/auth/save-session
- * Membuka tab Chromium untuk login manual, otomatis mendeteksi login, menyalin cookies, dan memperbarui cookies.json
  */
-export async function handleSaveLoginSession(req, res) {
+export async function handleSaveLoginSession(req, res, next) {
   try {
     console.log('📥 Menerima permintaan POST /api/auth/save-session...');
     const result = await promptManualLoginAndRefreshCookies();
@@ -348,11 +266,7 @@ export async function handleSaveLoginSession(req, res) {
       ...result,
     });
   } catch (error) {
-    console.error('❌ Error pada handleSaveLoginSession:', error);
-    return res.status(500).json({
-      status: 'error',
-      message: 'Gagal melakukan login manual atau waktu tunggu habis',
-      error: error.message,
-    });
+    error.customMessage = 'Gagal melakukan login manual atau waktu tunggu habis';
+    next(error);
   }
 }
