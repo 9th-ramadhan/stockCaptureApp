@@ -55,8 +55,64 @@ async function run() {
   writeLog('====================================================');
 
   if (isPastClosingTime()) {
-    writeLog('ℹ️ Saat ini di luar jam operasional perdagangan bursa (akhir pekan atau lewat 17:16 WITA). Runner dihentikan.');
-    process.exit(0);
+    writeLog('⚠️ PERINGATAN: Di luar jam operasional perdagangan bursa (akhir pekan atau lewat 17:16 WITA).');
+    writeLog('🔄 Mengaktifkan MODE FALLBACK: Menjalankan capture snapshot Orderbook terakhir...');
+
+    const PORT = process.env.PORT || 5000;
+    const snapshotUrl = `http://localhost:${PORT}/api/capture/orderbook`;
+    const healthUrl = `http://localhost:${PORT}/api/health`;
+
+    let serverRunning = false;
+    try {
+      const healthRes = await fetch(healthUrl, { signal: AbortSignal.timeout(3000) });
+      if (healthRes.ok) serverRunning = true;
+    } catch {
+      serverRunning = false;
+    }
+
+    let executedViaApi = false;
+    if (serverRunning) {
+      writeLog(`🌐 Server Express terdeteksi aktif di port ${PORT}. Memanggil endpoint fallback: ${snapshotUrl}...`);
+      try {
+        const res = await fetch(snapshotUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ headless: true }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+          writeLog(
+            `✅ Fallback Snapshot via API Berhasil! Total: ${data.data?.totalProcessed || 0}, Sukses: ${data.data?.successCount || 0}, Gagal: ${data.data?.failedCount || 0}`
+          );
+          executedViaApi = true;
+          process.exit(0);
+        } else {
+          writeLog(`⚠️ API snapshot mengembalikan respon error (${data.message || JSON.stringify(data)}). Beralih ke mandiri...`);
+        }
+      } catch (err) {
+        writeLog(`⚠️ Gagal memanggil endpoint API snapshot (${err.message}). Beralih ke mandiri...`);
+      }
+    }
+
+    if (!executedViaApi) {
+      writeLog(`ℹ️ Menjalankan capture snapshot Orderbook terakhir secara mandiri (in-process)...`);
+      try {
+        const { captureOrderbookSnapshotOnly } = await import('../services/puppeteerService.js');
+        const pool = (await import('../config/db.js')).default;
+
+        const result = await captureOrderbookSnapshotOnly([], { headless: true });
+
+        writeLog(
+          `✅ Fallback Snapshot Mandiri Selesai! Total: ${result.totalProcessed}, Sukses: ${result.successCount}, Gagal: ${result.failedCount} (${result.durationSeconds}s)`
+        );
+        await pool.end();
+        process.exit(0);
+      } catch (err) {
+        writeLog(`❌ Gagal mengeksekusi fallback snapshot mandiri: ${err.message}`);
+        process.exit(1);
+      }
+    }
+    return;
   }
 
   const PORT = process.env.PORT || 5000;
